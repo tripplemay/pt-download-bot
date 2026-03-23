@@ -28,6 +28,7 @@ class DownloadStationClient(DownloadClientBase):
         self.client = httpx.AsyncClient(timeout=30.0, verify=False)
         self._api_url = f"{self.host}/webapi/entry.cgi"
         self._use_v2: bool | None = None  # None = 未检测
+        self._destination: str = ""
 
     async def _login(self) -> None:
         """登录 Download Station，获取 SID"""
@@ -55,7 +56,7 @@ class DownloadStationClient(DownloadClientBase):
             await self._login()
 
     async def _detect_api_version(self) -> None:
-        """检测 v2 API 是否可用"""
+        """检测 v2 API 是否可用，并获取默认下载目录"""
         if self._use_v2 is not None:
             return
         await self._ensure_login()
@@ -72,9 +73,50 @@ class DownloadStationClient(DownloadClientBase):
         if data.get("success"):
             self._use_v2 = True
             logger.info("Download Station 使用 v2 API (DSM 7)")
+            await self._fetch_default_destination()
         else:
             self._use_v2 = False
+            self._destination = ""
             logger.info("Download Station 使用 v1 API (DSM 6)")
+
+    async def _fetch_default_destination(self) -> None:
+        """查询 Download Station 默认下载目录"""
+        params = {
+            "api": "SYNO.DownloadStation2.Settings.Location",
+            "version": "1",
+            "method": "get",
+            "_sid": self.sid,
+        }
+        try:
+            resp = await self.client.get(self._api_url, params=params)
+            data = resp.json()
+            if data.get("success"):
+                self._destination = data["data"].get("default_destination", "")
+                logger.info("Download Station 默认下载目录: %s", self._destination)
+                return
+        except Exception:
+            logger.warning("获取默认下载目录失败，尝试备用方式")
+
+        # 备用：从全局设置获取
+        params2 = {
+            "api": "SYNO.DownloadStation2.Settings.Global",
+            "version": "1",
+            "method": "get",
+            "_sid": self.sid,
+        }
+        try:
+            resp = await self.client.get(self._api_url, params=params2)
+            data = resp.json()
+            if data.get("success"):
+                self._destination = data["data"].get("default_destination", "")
+                logger.info("Download Station 下载目录(Global): %s", self._destination)
+                return
+        except Exception:
+            pass
+
+        # 最后兜底
+        self._destination = ""
+        logger.warning("无法获取默认下载目录，将使用空值")
 
     async def _api_request(self, method: str, **kwargs) -> dict:
         """发送 API 请求，SID 过期时自动重新登录重试"""
@@ -117,6 +159,7 @@ class DownloadStationClient(DownloadClientBase):
                     "version": "2",
                     "method": "create",
                     "uri": json.dumps([url]),
+                    "destination": json.dumps(self._destination),
                     "type": '"url"',
                     "create_list": "false",
                     "_sid": self.sid,
@@ -147,6 +190,7 @@ class DownloadStationClient(DownloadClientBase):
                     "api": "SYNO.DownloadStation2.Task",
                     "version": "2",
                     "method": "create",
+                    "destination": json.dumps(self._destination),
                     "type": '"file"',
                     "create_list": "false",
                     "_sid": self.sid,
