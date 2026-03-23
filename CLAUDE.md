@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PT Download Bot — a Telegram bot that searches PT sites (NexusPHP-based) for torrents and pushes downloads to NAS clients (Download Station, qBittorrent, Transmission). Multi-user with Owner approval system. Chinese UI.
+PT Download Bot — a Telegram bot that searches PT sites (NexusPHP-based) for torrents and pushes downloads to NAS clients (Download Station, qBittorrent, Transmission). Multi-user with Owner approval system. Chinese UI. Deployed on Synology NAS via Docker.
 
 ## Commands
 
@@ -20,8 +20,9 @@ python3 -m pytest tests/test_core.py::TestDatabase::test_init_owner_creates_owne
 python3 -m pytest --cov=bot --cov-report=term-missing  # with coverage
 
 # Docker
-docker-compose up -d
-docker-compose logs -f
+docker compose up -d                              # production (pre-built image)
+docker compose -f docker-compose.build.yml up -d  # local build
+docker compose logs -f
 ```
 
 ## Architecture
@@ -42,7 +43,11 @@ docker-compose logs -f
 - `bot/pt/base.py` → `PTSiteBase` (abstract) → `NexusPHPSite` (RSS search via `feedparser` + `httpx`, web search via HTML parsing as fallback)
 - `bot/clients/base.py` → `DownloadClientBase` (abstract) → 3 implementations. `create_download_client(config)` factory in `bot/clients/__init__.py` selects at runtime.
 
+**Download Station DSM 6/7 dual API**: `bot/clients/download_station.py` auto-detects API version at first use via `_detect_api_version()`. DSM 7 uses `SYNO.DownloadStation2.Task` (v2) with `url` field and required `destination` parameter (auto-fetched from DS settings). DSM 6 falls back to `SYNO.DownloadStation.Task` (v1) with `uri` field. All API calls go through `/webapi/entry.cgi`.
+
 **Progressive Chinese search** (`bot/handlers/search.py`): When a Chinese keyword is detected, the bot uses `_search_web_progressive()` which searches in precision order: (1) TMDB-translated English + title search, (2) Chinese + title search, (3) Chinese + description search. Each tier only triggers if previous results < 3. Falls back to RSS if no Cookie or web search fails.
+
+**NexusPHP HTML parser** (`bot/pt/nexusphp.py`): `_TorrentsPageParser` handles nested `<table>` inside title cells (common NexusPHP layout for title + subtitle). Tracks `_table_depth` so nested `</table>` doesn't prematurely end parsing. Only processes direct-child `<tr>` of the torrents table as data rows.
 
 **Search pagination**: `bot/handlers/search.py` uses a module-level `user_cache: dict` keyed by `user_id` to store search results and page state between `/search` and `/more` commands. `bot/handlers/download.py` imports and reads from the same cache for `/dl`.
 
@@ -54,10 +59,12 @@ docker-compose logs -f
 
 - Python 3.11+, only 3 runtime deps: `python-telegram-bot>=20.0`, `httpx>=0.25.0`, `feedparser>=6.0`
 - Fully async (`async/await`). All HTTP via `httpx.AsyncClient` with 30s timeout.
+- Telegram API uses `HTTPXRequest` with 30s connect/read/write timeouts (configured in `main.py`) to accommodate proxy/high-latency networks.
 - SQLite via stdlib `sqlite3` (no ORM). Single `Database` instance, `check_same_thread=False`.
 - Only 2 required env vars: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`. Everything else via Bot commands.
-- Docker deployment with `network_mode: host` (direct access to NAS services on LAN).
+- Docker: `network_mode: host`, non-root `botuser` via `entrypoint.sh` + `gosu`, `entrypoint.sh` fixes volume permissions on startup.
 - DB has 3 tables: `users` (role: owner/user/pending/banned), `download_logs`, `settings` (KV store for all runtime config).
+- Multi-arch Docker images (amd64 + arm64) built by GitHub Actions, published to `ghcr.io/tripplemay/pt-download-bot`.
 
 ## Testing Patterns
 
@@ -66,3 +73,4 @@ docker-compose logs -f
 - PT and download clients are mocked via `unittest.mock.AsyncMock`.
 - `user_cache` is cleared between tests via an `autouse` fixture in `test_handlers.py`.
 - Settings commands import `init_*` functions from `bot.main` at call time — patch at `bot.main.init_pt_client` etc.
+- `main()` tests must mock the full `ApplicationBuilder` chain including `.request()`, `.get_updates_request()` and `HTTPXRequest`.
