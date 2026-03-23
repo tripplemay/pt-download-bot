@@ -14,6 +14,13 @@ info()  { echo -e "\033[32m[INFO]\033[0m  $*"; }
 warn()  { echo -e "\033[33m[WARN]\033[0m  $*"; }
 error() { echo -e "\033[31m[ERROR]\033[0m $*"; }
 
+# curl | bash 时 stdin 是管道，read 必须从 /dev/tty 读取用户输入
+ask() {
+    local prompt="$1" var="$2"
+    printf "%s" "$prompt" >/dev/tty
+    IFS= read -r "$var" </dev/tty
+}
+
 # 兼容 docker compose (v2) 和 docker-compose (v1)
 detect_compose() {
     if docker compose version >/dev/null 2>&1; then
@@ -49,7 +56,7 @@ info "Docker 已就绪（${COMPOSE}）"
 # 2. 检测已有安装
 if [ -d "$INSTALL_DIR" ]; then
     warn "检测到已有安装：${INSTALL_DIR}"
-    read -p "是否覆盖安装？已有数据会自动备份 (y/N) " confirm
+    ask "是否覆盖安装？已有数据会自动备份 (y/N) " confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         echo "已取消。"
         exit 0
@@ -57,12 +64,10 @@ if [ -d "$INSTALL_DIR" ]; then
 
     info "备份到 ${BACKUP_DIR} ..."
     mkdir -p "$BACKUP_DIR"
-    # 备份 .env 和数据库
     [ -f "$INSTALL_DIR/.env" ]          && cp "$INSTALL_DIR/.env" "$BACKUP_DIR/.env"
     [ -d "$INSTALL_DIR/data" ]          && cp -r "$INSTALL_DIR/data" "$BACKUP_DIR/data"
     [ -f "$INSTALL_DIR/docker-compose.yml" ] && cp "$INSTALL_DIR/docker-compose.yml" "$BACKUP_DIR/docker-compose.yml"
 
-    # 停止旧容器
     info "停止旧容器..."
     cd "$INSTALL_DIR"
     $COMPOSE down 2>/dev/null || true
@@ -90,16 +95,16 @@ echo ""
 echo "请输入以下 2 项必填配置："
 echo ""
 
-read -p "Telegram Bot Token（从 @BotFather 获取）: " bot_token
+ask "Telegram Bot Token（从 @BotFather 获取）: " bot_token
 while [ -z "$bot_token" ]; do
     echo "  ❌ Bot Token 不能为空"
-    read -p "Telegram Bot Token: " bot_token
+    ask "Telegram Bot Token: " bot_token
 done
 
-read -p "你的 Telegram User ID（从 @userinfobot 获取）: " owner_id
+ask "你的 Telegram User ID（从 @userinfobot 获取）: " owner_id
 while [ -z "$owner_id" ]; do
     echo "  ❌ User ID 不能为空"
-    read -p "Telegram User ID: " owner_id
+    ask "Telegram User ID: " owner_id
 done
 
 # 7. 写入 .env
