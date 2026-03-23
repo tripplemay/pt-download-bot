@@ -187,6 +187,7 @@ class TestMainFunction:
         mock_builder.read_timeout.return_value = mock_builder
         mock_builder.write_timeout.return_value = mock_builder
         mock_builder.request.return_value = mock_builder
+        mock_builder.get_updates_request.return_value = mock_builder
         mock_builder.build.return_value = mock_app
 
         with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \
@@ -226,6 +227,7 @@ class TestMainFunction:
         mock_builder.read_timeout.return_value = mock_builder
         mock_builder.write_timeout.return_value = mock_builder
         mock_builder.request.return_value = mock_builder
+        mock_builder.get_updates_request.return_value = mock_builder
         mock_builder.build.return_value = mock_app
 
         with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \

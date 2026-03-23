@@ -267,13 +267,12 @@ def main():
 
     # 5. 构建 Telegram Application（增大超时，适配代理/高延迟网络）
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+    get_updates_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
     app = (
         ApplicationBuilder()
         .token(bot_token)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
         .request(request)
+        .get_updates_request(get_updates_request)
         .build()
     )
 
