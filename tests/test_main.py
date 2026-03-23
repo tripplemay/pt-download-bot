@@ -181,22 +181,26 @@ class TestMainFunction:
         mock_app = MagicMock()
         mock_app.bot_data = {}
         mock_builder = MagicMock()
+        # Builder uses chained calls: .token().connect_timeout().read_timeout()...build()
         mock_builder.token.return_value = mock_builder
+        mock_builder.connect_timeout.return_value = mock_builder
+        mock_builder.read_timeout.return_value = mock_builder
+        mock_builder.write_timeout.return_value = mock_builder
+        mock_builder.request.return_value = mock_builder
         mock_builder.build.return_value = mock_app
 
-        with patch("bot.main.ApplicationBuilder", return_value=mock_builder):
+        with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \
+             patch("bot.main.HTTPXRequest"):
             from bot.main import main
             main()
 
             mock_builder.token.assert_called_once_with("fake:token")
             mock_app.run_polling.assert_called_once()
 
-            # handlers registered (now more with settings commands)
             assert mock_app.add_handler.call_count >= 20
 
             assert "db" in mock_app.bot_data
             assert mock_app.bot_data["owner_id"] == 111
-            # Without PT/DL env vars, clients should be None
             assert mock_app.bot_data["pt_client"] is None
             assert mock_app.bot_data["dl_client"] is None
             assert mock_app.bot_data["tmdb_client"] is None
@@ -218,9 +222,14 @@ class TestMainFunction:
         mock_app.bot_data = {}
         mock_builder = MagicMock()
         mock_builder.token.return_value = mock_builder
+        mock_builder.connect_timeout.return_value = mock_builder
+        mock_builder.read_timeout.return_value = mock_builder
+        mock_builder.write_timeout.return_value = mock_builder
+        mock_builder.request.return_value = mock_builder
         mock_builder.build.return_value = mock_app
 
         with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \
+             patch("bot.main.HTTPXRequest"), \
              patch("bot.main.NexusPHPSite") as mock_pt, \
              patch("bot.main.create_download_client") as mock_dl:
 

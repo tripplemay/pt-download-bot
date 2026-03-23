@@ -13,6 +13,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+from telegram.request import HTTPXRequest
 
 from bot.config import load_config
 from bot.database import Database
@@ -264,8 +265,17 @@ def main():
 
     page_size = int(os.environ.get("PT_PAGE_SIZE", "10"))
 
-    # 5. 构建 Telegram Application
-    app = ApplicationBuilder().token(bot_token).build()
+    # 5. 构建 Telegram Application（增大超时，适配代理/高延迟网络）
+    request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0)
+    app = (
+        ApplicationBuilder()
+        .token(bot_token)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .request(request)
+        .build()
+    )
 
     app.bot_data["db"] = db
     app.bot_data["pt_client"] = pt_client
