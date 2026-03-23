@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   pt-bot:
-    image: ghcr.io/tripplemay/pt-download-bot:latest
+    build: .
     container_name: pt-download-bot
     restart: unless-stopped
     env_file:

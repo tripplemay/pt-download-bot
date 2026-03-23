@@ -40,8 +40,13 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     selected = results[index - 1]
-    pt_client = context.bot_data["pt_client"]
-    dl_client = context.bot_data["dl_client"]
+    pt_client = context.bot_data.get("pt_client")
+    dl_client = context.bot_data.get("dl_client")
+    if not dl_client:
+        await update.message.reply_text(
+            "下载客户端尚未配置。\n管理员请先使用 /setds、/setqb 或 /settr 完成配置。"
+        )
+        return
     db = context.bot_data["db"]
     owner_id = context.bot_data["owner_id"]
 

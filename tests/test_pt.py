@@ -455,6 +455,59 @@ SAMPLE_TORRENTS_HTML = '''
 </table>
 '''
 
+# Realistic NexusPHP HTML — title cell contains a nested <table> for
+# title + subtitle layout (this is the structure that caused the original bug).
+NESTED_TABLE_HTML = '''
+<table class="torrents">
+<tr><td class="colhead">类型</td><td class="colhead">标题</td><td class="colhead">大小</td></tr>
+<tr>
+  <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
+  <td class="rowfollow">
+    <table class="torrentname" width="100%">
+      <tr>
+        <td class="embedded">
+          <a href="details.php?id=100" title="Breaking Bad S01 1080p BluRay"><b>Breaking Bad S01 1080p BluRay</b></a>
+          <a href="download.php?id=100"><img class="download" src="pic/trans.gif" /></a>
+        </td>
+      </tr>
+      <tr><td class="embedded">绝命毒师 第一季 蓝光</td></tr>
+    </table>
+  </td>
+  <td class="rowfollow">14.37 GB</td>
+</tr>
+<tr>
+  <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
+  <td class="rowfollow">
+    <table class="torrentname" width="100%">
+      <tr>
+        <td class="embedded">
+          <a href="details.php?id=101"><b>Breaking Bad S02 1080p BluRay</b></a>
+          <a href="download.php?id=101"><img class="download" src="pic/trans.gif" /></a>
+        </td>
+      </tr>
+      <tr><td class="embedded">绝命毒师 第二季 蓝光</td></tr>
+    </table>
+  </td>
+  <td class="rowfollow">22.10 GB</td>
+</tr>
+<tr>
+  <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
+  <td class="rowfollow">
+    <table class="torrentname" width="100%">
+      <tr>
+        <td class="embedded">
+          <a href="details.php?id=102"><b>Breaking Bad S03 1080p BluRay</b></a>
+          <a href="download.php?id=102"><img class="download" src="pic/trans.gif" /></a>
+        </td>
+      </tr>
+      <tr><td class="embedded">绝命毒师 第三季 蓝光</td></tr>
+    </table>
+  </td>
+  <td class="rowfollow">30.50 GB</td>
+</tr>
+</table>
+'''
+
 
 class TestTorrentsPageParser:
 
@@ -500,6 +553,85 @@ class TestTorrentsPageParser:
         html = "<html><body>No torrents here</body></html>"
         results = _parse_torrents_html(html, "https://example.com", "pk123")
         assert results == []
+
+
+class TestNestedTableParsing:
+    """Tests for NexusPHP HTML with nested <table> in title cells."""
+
+    def test_nested_table_extracts_all_entries(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        assert len(results) == 3
+
+    def test_nested_table_titles_correct(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        # First entry uses title attribute on <a>
+        assert results[0].title == "Breaking Bad S01 1080p BluRay"
+        # Others use text content inside <b>
+        assert results[1].title == "Breaking Bad S02 1080p BluRay"
+        assert results[2].title == "Breaking Bad S03 1080p BluRay"
+
+    def test_nested_table_download_links(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        for i, r in enumerate(results):
+            assert f"download.php?id=10{i}" in r.torrent_url
+            assert "passkey=pk123" in r.torrent_url
+
+    def test_nested_table_sizes(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        assert results[0].size == "14.37 GB"
+        assert results[1].size == "22.10 GB"
+        assert results[2].size == "30.50 GB"
+
+    def test_nested_table_detail_links(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        for i, r in enumerate(results):
+            assert r.link == f"https://example.com/details.php?id=10{i}"
+
+    def test_title_from_a_title_attribute(self):
+        """When <a> has a title attribute, it should be preferred."""
+        html = '''
+        <table class="torrents">
+        <tr>
+          <td>
+            <table><tr><td>
+              <a href="details.php?id=1" title="Full Title From Attr"><b>Short</b></a>
+              <a href="download.php?id=1"><img /></a>
+            </td></tr></table>
+          </td>
+        </tr>
+        </table>
+        '''
+        results = _parse_torrents_html(html, "https://example.com", "pk")
+        assert len(results) == 1
+        assert results[0].title == "Full Title From Attr"
+
+    def test_many_entries_with_nested_tables(self):
+        """Simulate a page with 50 entries, all using nested tables."""
+        rows = []
+        for i in range(50):
+            rows.append(f'''
+            <tr>
+              <td class="rowfollow">
+                <table class="torrentname"><tr><td>
+                  <a href="details.php?id={i}"><b>Movie {i}</b></a>
+                  <a href="download.php?id={i}"><img /></a>
+                </td></tr></table>
+              </td>
+              <td>{i + 1}.00 GB</td>
+            </tr>''')
+        html = '<table class="torrents">' + "".join(rows) + '</table>'
+        results = _parse_torrents_html(html, "https://x.com", "pk")
+        assert len(results) == 50
 
 
 # ===================================================================

@@ -12,7 +12,7 @@ PT Download Bot — a Telegram bot that searches PT sites (NexusPHP-based) for t
 # Run bot locally
 python -m bot.main
 
-# Tests (222 tests, 93% coverage)
+# Tests (284 tests)
 python3 -m pytest tests/                          # all tests
 python3 -m pytest tests/test_handlers.py          # single file
 python3 -m pytest tests/test_core.py::TestDatabase # single class
@@ -26,29 +26,38 @@ docker-compose logs -f
 
 ## Architecture
 
-**Entry point**: `bot/main.py` → `main()` loads config, initializes all components, registers handlers, starts polling.
+**Entry point**: `bot/main.py` → `main()` loads config, initializes components, registers handlers, starts polling.
 
-**Shared state via `context.bot_data`**: All handlers receive a Telegram `context` object. Shared instances (Database, PT client, download client, TMDB client, owner_id, page_size) are stored in `context.bot_data["key"]` — set once in `main()`, read everywhere. This is the primary dependency injection mechanism.
+**Two-tier config**: Only `TELEGRAM_BOT_TOKEN` and `OWNER_TELEGRAM_ID` are required env vars. All other config (PT site, download client, TMDB) is stored in the SQLite `settings` table and managed via Bot commands (`/setsite`, `/setpasskey`, `/setds`, `/setqb`, `/settr`, `/settmdb`, `/setcookie`). On first boot, `_migrate_env_to_db()` syncs any legacy `.env` values into the database (without overwriting existing DB values).
 
-**Auth flow via decorators**: `bot/middleware.py` provides `@require_auth` (user/owner role) and `@require_owner` decorators that wrap handler functions. They check `context.bot_data["db"]` and short-circuit with role-appropriate error messages. Applied directly on handler functions in `bot/handlers/`.
+**Graceful degradation**: `pt_client`, `dl_client`, and `tmdb_client` in `context.bot_data` may be `None` if not yet configured. All handlers that use these clients check for `None` and return a user-friendly "not configured" message. Commands in `bot/handlers/settings.py` dynamically reinitialize clients after saving config — no Bot restart needed.
+
+**Setup wizard**: When Owner sends `/start` and `setup_completed` is not `"true"` in settings, the bot displays a step-by-step guide. Each `/set*` command checks if all required config is complete (`_check_setup_complete`) and auto-marks `setup_completed = true` when ready.
+
+**Shared state via `context.bot_data`**: All handlers receive a Telegram `context` object. Shared instances (Database, PT client, download client, TMDB client, owner_id, page_size) are stored in `context.bot_data["key"]` — set in `main()`, updated by `/set*` commands, read everywhere.
+
+**Auth flow via decorators**: `bot/middleware.py` provides `@require_auth` (user/owner role) and `@require_owner` decorators that wrap handler functions. They check `context.bot_data["db"]` and short-circuit with role-appropriate error messages.
 
 **Two abstraction layers with factory pattern**:
 - `bot/pt/base.py` → `PTSiteBase` (abstract) → `NexusPHPSite` (RSS search via `feedparser` + `httpx`, web search via HTML parsing as fallback)
 - `bot/clients/base.py` → `DownloadClientBase` (abstract) → 3 implementations. `create_download_client(config)` factory in `bot/clients/__init__.py` selects at runtime.
 
-**Chinese search optimization** (`bot/handlers/search.py`): RSS only matches English titles. When a Chinese keyword is detected (`_contains_chinese`), the bot: (1) translates via TMDB API (`bot/tmdb.py`) to get the English name, (2) searches RSS with the English name, (3) if results < 3, falls back to web scraping `torrents.php` with `search_area=1` (subtitle search). Web search requires `PT_COOKIE` env var; TMDB requires `TMDB_API_KEY`. Both are optional — without them, only RSS search is used.
+**Progressive Chinese search** (`bot/handlers/search.py`): When a Chinese keyword is detected, the bot uses `_search_web_progressive()` which searches in precision order: (1) TMDB-translated English + title search, (2) Chinese + title search, (3) Chinese + description search. Each tier only triggers if previous results < 3. Falls back to RSS if no Cookie or web search fails.
 
 **Search pagination**: `bot/handlers/search.py` uses a module-level `user_cache: dict` keyed by `user_id` to store search results and page state between `/search` and `/more` commands. `bot/handlers/download.py` imports and reads from the same cache for `/dl`.
 
-**User approval flow**: `/apply` → creates pending DB record → sends Owner an `InlineKeyboardMarkup` with approve/reject buttons → `CallbackQueryHandler` in `bot/handlers/start.py::approval_callback` processes the response.
+**Download two-tier fallback**: `/dl` first tries `add_torrent_url` (passing URL to client). If that fails, downloads the `.torrent` file via `pt_client.download_torrent()` then uses `add_torrent_file` (uploading bytes). Non-Owner downloads trigger a notification to Owner.
+
+**Security**: All `/set*` commands that receive sensitive data (passkey, password, cookie, API key) immediately delete the user's message via `_delete_user_message()`. `/settings` only shows "已配置/未配置" status, never actual values.
 
 ## Key Constraints
 
 - Python 3.11+, only 3 runtime deps: `python-telegram-bot>=20.0`, `httpx>=0.25.0`, `feedparser>=6.0`
 - Fully async (`async/await`). All HTTP via `httpx.AsyncClient` with 30s timeout.
 - SQLite via stdlib `sqlite3` (no ORM). Single `Database` instance, `check_same_thread=False`.
-- Config exclusively from environment variables (see `.env.example`). Required: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `PT_SITE_URL`, `PT_PASSKEY`. Optional: `TMDB_API_KEY` (Chinese translation), `PT_COOKIE` (web search fallback).
+- Only 2 required env vars: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`. Everything else via Bot commands.
 - Docker deployment with `network_mode: host` (direct access to NAS services on LAN).
+- DB has 3 tables: `users` (role: owner/user/pending/banned), `download_logs`, `settings` (KV store for all runtime config).
 
 ## Testing Patterns
 
@@ -56,3 +65,4 @@ docker-compose logs -f
 - `tests/conftest.py` provides: `tmp_db` / `db_with_owner` / `db_with_users` fixtures for SQLite, plus `make_update()` and `make_context()` helpers that create mock Telegram objects.
 - PT and download clients are mocked via `unittest.mock.AsyncMock`.
 - `user_cache` is cleared between tests via an `autouse` fixture in `test_handlers.py`.
+- Settings commands import `init_*` functions from `bot.main` at call time — patch at `bot.main.init_pt_client` etc.

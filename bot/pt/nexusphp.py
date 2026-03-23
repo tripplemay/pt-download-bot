@@ -36,83 +36,115 @@ def _parse_size_from_title(title: str) -> str:
 
 
 class _TorrentsPageParser(HTMLParser):
-    """Parse NexusPHP torrents.php HTML to extract torrent entries."""
+    """Parse NexusPHP torrents.php HTML to extract torrent entries.
+
+    NexusPHP uses nested <table> inside the title cell (for title + subtitle
+    layout).  We track table nesting depth so a nested </table> does not
+    prematurely end parsing, and only treat direct-child <tr> of the
+    torrents table as data rows.
+    """
 
     def __init__(self):
         super().__init__()
         self.results: List[dict] = []
-        self._in_table = False
-        self._in_row = False
-        self._in_cell = False
-        self._cell_count = 0
-        self._current = {}
-        self._capture_text = False
-        self._text_buf = ""
-        self._found_title_link = False
+        self._in_torrents_table = False
+        self._table_depth = 0       # nesting depth; 1 = directly in torrents table
+        self._in_outer_row = False   # inside a direct-child <tr>
+        self._current: dict = {}
+        self._title_buf = ""
+        self._cell_buf = ""
+        self._capturing_title = False
+        self._has_title = False
 
     def handle_starttag(self, tag, attrs):
         attr_dict = dict(attrs)
 
-        if tag == "table" and "torrents" in attr_dict.get("class", ""):
-            self._in_table = True
+        if tag == "table":
+            if self._in_torrents_table:
+                self._table_depth += 1
+            elif "torrents" in attr_dict.get("class", ""):
+                self._in_torrents_table = True
+                self._table_depth = 1
             return
 
-        if not self._in_table:
+        if not self._in_torrents_table:
             return
 
         if tag == "tr":
-            self._in_row = True
-            self._cell_count = 0
-            self._current = {}
-            self._found_title_link = False
+            # Only start a new data row for direct children of the torrents table
+            if self._table_depth == 1 and not self._in_outer_row:
+                self._in_outer_row = True
+                self._current = {}
+                self._has_title = False
+                self._capturing_title = False
+                self._title_buf = ""
             return
 
-        if tag == "td" and self._in_row:
-            self._in_cell = True
-            self._cell_count += 1
-            self._text_buf = ""
-            self._capture_text = True
+        if not self._in_outer_row:
             return
 
-        if tag == "a" and self._in_row:
+        if tag == "td" and self._table_depth == 1:
+            self._cell_buf = ""
+
+        if tag == "a":
             href = attr_dict.get("href", "")
-            if "details.php" in href and "id=" in href and not self._found_title_link:
-                self._found_title_link = True
+            if "details.php" in href and "id=" in href and not self._has_title:
                 self._current["detail_link"] = href
-                self._capture_text = True
-                self._text_buf = ""
+                # NexusPHP often puts the full title in the <a title="..."> attr
+                title_attr = attr_dict.get("title", "")
+                if title_attr:
+                    self._current["title"] = title_attr
+                    self._has_title = True
+                else:
+                    self._capturing_title = True
+                    self._title_buf = ""
             elif "download.php" in href and "id=" in href:
-                self._current["download_link"] = href
+                if "download_link" not in self._current:
+                    self._current["download_link"] = href
 
     def handle_data(self, data):
-        if self._capture_text:
-            self._text_buf += data
+        if not self._in_outer_row:
+            return
+        if self._capturing_title:
+            self._title_buf += data
+        if self._table_depth == 1:
+            self._cell_buf += data
 
     def handle_endtag(self, tag):
-        if not self._in_table:
+        if not self._in_torrents_table:
             return
 
-        if tag == "a" and self._found_title_link and self._text_buf.strip() and "title" not in self._current:
-            self._current["title"] = self._text_buf.strip()
-            self._text_buf = ""
+        if tag == "table":
+            self._table_depth -= 1
+            if self._table_depth <= 0:
+                self._in_torrents_table = False
+                # Flush any pending outer row
+                if self._in_outer_row:
+                    if self._current.get("title") and self._current.get("download_link"):
+                        self.results.append(self._current)
+                    self._in_outer_row = False
+            return
 
-        if tag == "td" and self._in_cell:
-            self._in_cell = False
-            self._capture_text = False
-            cell_text = self._text_buf.strip()
-            # Try to detect size cells (e.g., "14.37 GB", "1.5 TB", "100.5 GiB")
-            if cell_text and re.match(r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", cell_text, re.IGNORECASE):
+        if tag == "a" and self._capturing_title:
+            text = self._title_buf.strip()
+            if text and not self._has_title:
+                self._current["title"] = text
+                self._has_title = True
+            self._capturing_title = False
+
+        if tag == "td" and self._in_outer_row and self._table_depth == 1:
+            cell_text = self._cell_buf.strip()
+            if cell_text and re.match(
+                r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", cell_text, re.IGNORECASE
+            ):
                 self._current.setdefault("size", cell_text)
-            self._text_buf = ""
+            self._cell_buf = ""
 
-        if tag == "tr" and self._in_row:
-            self._in_row = False
+        if tag == "tr" and self._in_outer_row and self._table_depth == 1:
+            self._in_outer_row = False
             if self._current.get("title") and self._current.get("download_link"):
                 self.results.append(self._current)
             self._current = {}
-
-        if tag == "table" and self._in_table:
-            self._in_table = False
 
 
 def _parse_torrents_html(html: str, base_url: str, passkey: str) -> List[TorrentResult]:
@@ -246,7 +278,16 @@ class NexusPHPSite(PTSiteBase):
         if "login.php" in str(resp.url) or 'name="username"' in html or "<title>Login" in html:
             raise CookieExpiredError("Cookie 已失效，请重新设置")
 
-        return _parse_torrents_html(html, self.base_url, self.passkey)
+        logger.debug("search_web HTML length: %d chars", len(html))
+        has_table = 'class="torrents"' in html
+        logger.debug("search_web torrents table found: %s", has_table)
+
+        results = _parse_torrents_html(html, self.base_url, self.passkey)
+        logger.info(
+            "search_web '%s' (area=%d) parsed %d results from %d chars",
+            keyword, search_area, len(results), len(html),
+        )
+        return results
 
     # ------------------------------------------------------------------
     # 下载种子

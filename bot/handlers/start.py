@@ -4,8 +4,30 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 
+_SETUP_GUIDE = (
+    "👋 欢迎使用 <b>PT Download Bot</b>！\n\n"
+    "检测到首次使用，请按以下步骤配置：\n\n"
+    "1️⃣ <b>设置 PT 站</b>（必需）\n"
+    "   /setsite PT站地址\n"
+    "   例如：/setsite https://ptchdbits.co\n\n"
+    "2️⃣ <b>设置 Passkey</b>（必需）\n"
+    "   /setpasskey 你的Passkey\n\n"
+    "3️⃣ <b>设置下载客户端</b>（必需）\n"
+    "   群晖：/setds 地址 用户名 密码\n"
+    "   qBittorrent：/setqb 地址 用户名 密码\n"
+    "   Transmission：/settr 地址 用户名 密码\n"
+    "   例如：/setds http://localhost:5000 admin password123\n\n"
+    "4️⃣ <b>设置 Cookie</b>（推荐，搜索结果更完整）\n"
+    "   /setcookie Cookie值\n\n"
+    "5️⃣ <b>设置 TMDB</b>（推荐，提升中文搜索精度）\n"
+    "   /settmdb API_Key\n\n"
+    "完成 1-3 步后即可使用 /s 搜索影片！\n"
+    "使用 /settings 查看当前配置状态。"
+)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """根据用户角色显示不同欢迎语。"""
+    """根据用户角色显示不同欢迎语。Owner 首次使用时显示引导向导。"""
     db = context.bot_data["db"]
     user = db.get_user(update.effective_user.id)
 
@@ -23,10 +45,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user.role == "banned":
         text = "你已被封禁，无法使用此 Bot。"
     elif user.role == "owner":
-        text = (
-            "欢迎回来，<b>管理员</b>！\n\n"
-            "发送 /help 查看可用命令。"
-        )
+        # 首次使用引导
+        if db.get_setting("setup_completed") != "true":
+            text = _SETUP_GUIDE
+        else:
+            text = (
+                "欢迎回来，<b>管理员</b>！\n\n"
+                "发送 /help 查看可用命令。"
+            )
     else:
         text = (
             "欢迎回来！\n\n"
@@ -177,9 +203,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "/pending — 查看待审批用户\n"
             + "/ban &lt;用户ID&gt; — 封禁用户\n"
             + "/unban &lt;用户ID&gt; — 解封用户\n"
-            + "/setcookie — 设置 PT 站 Cookie\n"
-            + "/cookiestatus — 查看 Cookie 状态\n"
             + "/test — 测试连接\n"
+            + "\n<b>设置命令</b>\n\n"
+            + "/setsite — 设置 PT 站地址\n"
+            + "/setpasskey — 设置 Passkey\n"
+            + "/setcookie — 设置 Cookie\n"
+            + "/settmdb — 设置 TMDB API Key\n"
+            + "/setds — 设置 Download Station\n"
+            + "/setqb — 设置 qBittorrent\n"
+            + "/settr — 设置 Transmission\n"
+            + "/settings — 查看所有设置\n"
         )
     else:
         text = (
@@ -189,14 +222,5 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "/more — 下一页\n"
             + "/status — 查看下载任务\n"
         )
-
-    # Cookie 未配置提示（仅 Owner 可见）
-    if user and user.role == "owner":
-        cookie = db.get_setting("pt_cookie")
-        if not cookie:
-            text += (
-                "\n<i>提示：网页版搜索未启用，搜索结果可能较少。"
-                "使用 /setcookie 配置 Cookie 以获取完整结果。</i>\n"
-            )
 
     await update.message.reply_text(text, parse_mode="HTML")

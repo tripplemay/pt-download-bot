@@ -7,7 +7,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot/ ./bot/
 
-# 数据目录
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data \
+    && useradd -m -r botuser \
+    && chown -R botuser:botuser /app
+
+USER botuser
 
 CMD ["python", "-m", "bot.main"]

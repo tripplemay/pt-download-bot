@@ -139,7 +139,7 @@ logger = logging.getLogger(__name__)
 async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setcookie <cookie值> — 设置 PT 站 Cookie 以启用网页版搜索。"""
     db = context.bot_data["db"]
-    pt_client = context.bot_data["pt_client"]
+    pt_client = context.bot_data.get("pt_client")
 
     # 立即删除包含 Cookie 的消息（保护安全）
     try:
@@ -169,6 +169,14 @@ async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 验证 Cookie：尝试用它请求 torrents.php
+    if not pt_client:
+        db.set_setting("pt_cookie", cookie)
+        await msg.edit_text(
+            "Cookie 已保存（PT 站尚未配置，无法验证）。\n"
+            "请先用 /setsite 和 /setpasskey 配置 PT 站。"
+        )
+        return
+
     try:
         results = await pt_client.search_web("test", cookie=cookie, search_area=0)
         # 如果没抛 CookieExpiredError，说明 Cookie 有效

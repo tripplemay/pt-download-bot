@@ -165,17 +165,54 @@ class TestStatusCommand:
 class TestMainFunction:
     """Test that main() wires everything together."""
 
-    def test_main_initializes_and_starts(self, monkeypatch):
-        """Test main() with all dependencies mocked."""
+    def test_main_minimal_env(self, monkeypatch):
+        """Test main() starts with only TELEGRAM_BOT_TOKEN + OWNER_TELEGRAM_ID."""
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake:token")
         monkeypatch.setenv("OWNER_TELEGRAM_ID", "111")
+        monkeypatch.setenv("DB_PATH", os.path.join(tempfile.mkdtemp(), "test.db"))
+        # Remove optional env vars
+        for key in ["PT_SITE_URL", "PT_PASSKEY", "DOWNLOAD_CLIENT",
+                     "DS_HOST", "DS_USERNAME", "DS_PASSWORD",
+                     "QB_HOST", "QB_USERNAME", "QB_PASSWORD",
+                     "TR_HOST", "TR_USERNAME", "TR_PASSWORD",
+                     "TMDB_API_KEY", "PT_COOKIE"]:
+            monkeypatch.delenv(key, raising=False)
+
+        mock_app = MagicMock()
+        mock_app.bot_data = {}
+        mock_builder = MagicMock()
+        mock_builder.token.return_value = mock_builder
+        mock_builder.build.return_value = mock_app
+
+        with patch("bot.main.ApplicationBuilder", return_value=mock_builder):
+            from bot.main import main
+            main()
+
+            mock_builder.token.assert_called_once_with("fake:token")
+            mock_app.run_polling.assert_called_once()
+
+            # handlers registered (now more with settings commands)
+            assert mock_app.add_handler.call_count >= 20
+
+            assert "db" in mock_app.bot_data
+            assert mock_app.bot_data["owner_id"] == 111
+            # Without PT/DL env vars, clients should be None
+            assert mock_app.bot_data["pt_client"] is None
+            assert mock_app.bot_data["dl_client"] is None
+            assert mock_app.bot_data["tmdb_client"] is None
+
+    def test_main_with_env_migration(self, monkeypatch):
+        """Test main() migrates .env config to database."""
+        db_path = os.path.join(tempfile.mkdtemp(), "test.db")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake:token")
+        monkeypatch.setenv("OWNER_TELEGRAM_ID", "111")
+        monkeypatch.setenv("DB_PATH", db_path)
         monkeypatch.setenv("PT_SITE_URL", "https://example.com")
         monkeypatch.setenv("PT_PASSKEY", "fakekey")
         monkeypatch.setenv("DOWNLOAD_CLIENT", "download_station")
         monkeypatch.setenv("DS_HOST", "http://localhost:5000")
         monkeypatch.setenv("DS_USERNAME", "admin")
         monkeypatch.setenv("DS_PASSWORD", "pass")
-        monkeypatch.setenv("DB_PATH", os.path.join(tempfile.mkdtemp(), "test.db"))
 
         mock_app = MagicMock()
         mock_app.bot_data = {}
@@ -185,27 +222,14 @@ class TestMainFunction:
 
         with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \
              patch("bot.main.NexusPHPSite") as mock_pt, \
-             patch("bot.main.create_download_client") as mock_dl, \
-             patch("bot.main.TMDBClient") as mock_tmdb:
+             patch("bot.main.create_download_client") as mock_dl:
 
             mock_pt.return_value = MagicMock()
             mock_dl.return_value = MagicMock()
-            mock_tmdb.return_value = MagicMock()
 
             from bot.main import main
             main()
 
-            # Verify app was built and polling started
-            mock_builder.token.assert_called_once_with("fake:token")
-            mock_builder.build.assert_called_once()
             mock_app.run_polling.assert_called_once()
-
-            # Verify handlers were registered
-            assert mock_app.add_handler.call_count >= 14  # 14 commands + 1 callback
-
-            # Verify bot_data populated
-            assert "db" in mock_app.bot_data
-            assert "pt_client" in mock_app.bot_data
-            assert "dl_client" in mock_app.bot_data
-            assert "tmdb_client" in mock_app.bot_data
-            assert mock_app.bot_data["owner_id"] == 111
+            assert mock_app.bot_data["pt_client"] is not None
+            assert mock_app.bot_data["dl_client"] is not None

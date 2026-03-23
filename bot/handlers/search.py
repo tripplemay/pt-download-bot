@@ -1,5 +1,7 @@
 """搜索命令处理 — /search, /s, /more"""
 
+from __future__ import annotations
+
 import logging
 import re
 
@@ -20,6 +22,61 @@ user_cache: dict = {}
 def _contains_chinese(text: str) -> bool:
     """检测文本是否包含中文字符。"""
     return bool(re.search(r'[\u4e00-\u9fff]', text))
+
+
+# 渐进式搜索：结果不足此阈值时继续扩大搜索范围
+_MIN_RESULTS = 3
+
+
+def _merge_results(existing: list, new: list) -> list:
+    """将 new 中不重复的结果追加到 existing，按 torrent_url 去重。"""
+    seen = {r.torrent_url for r in existing}
+    merged = list(existing)
+    for r in new:
+        if r.torrent_url not in seen:
+            merged.append(r)
+            seen.add(r.torrent_url)
+    return merged
+
+
+async def _search_web_progressive(pt_client, cookie: str, keyword: str, translated: str | None) -> list:
+    """按精准度逐级扩大搜索范围，避免一上来就搜简介导致大量无关结果。
+
+    优先级（从精准到宽泛）：
+    1. 英文翻译 + 标题搜索  （最精准）
+    2. 中文原词 + 标题搜索
+    3. 中文原词 + 简介搜索  （最宽泛，最后手段）
+
+    非中文关键词只执行标题搜索。
+    每级仅在前一级结果不足 _MIN_RESULTS 条时才触发。
+    """
+    results: list = []
+
+    # 1) 英文翻译 + 标题搜索（最精准）
+    if translated:
+        results = await pt_client.search_web(translated, cookie=cookie, search_area=0)
+        logger.info("网页搜索 [英文标题] '%s' → %d 条", translated, len(results))
+
+    # 非中文关键词到此结束
+    if not _contains_chinese(keyword):
+        if not results:
+            results = await pt_client.search_web(keyword, cookie=cookie, search_area=0)
+            logger.info("网页搜索 [标题] '%s' → %d 条", keyword, len(results))
+        return results
+
+    # 2) 中文原词 + 标题搜索
+    if len(results) < _MIN_RESULTS:
+        cn_title = await pt_client.search_web(keyword, cookie=cookie, search_area=0)
+        logger.info("网页搜索 [中文标题] '%s' → %d 条", keyword, len(cn_title))
+        results = _merge_results(results, cn_title)
+
+    # 3) 中文原词 + 简介搜索（最后手段）
+    if len(results) < _MIN_RESULTS:
+        cn_desc = await pt_client.search_web(keyword, cookie=cookie, search_area=1)
+        logger.info("网页搜索 [中文简介] '%s' → %d 条", keyword, len(cn_desc))
+        results = _merge_results(results, cn_desc)
+
+    return results
 
 
 def _format_results(results: list, page: int, page_size: int) -> str:
@@ -61,7 +118,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyword = " ".join(context.args)
-    pt_client = context.bot_data["pt_client"]
+    pt_client = context.bot_data.get("pt_client")
+    if not pt_client:
+        await update.message.reply_text(
+            "PT 站尚未配置。\n管理员请先使用 /setsite 和 /setpasskey 完成配置。"
+        )
+        return
     tmdb_client = context.bot_data.get("tmdb_client")
     db = context.bot_data["db"]
     page_size = context.bot_data.get("page_size", 10)
@@ -83,35 +145,21 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-    # Step 2: 尝试网页版搜索（结果完整）
+    # Step 2: 网页版搜索（有 Cookie 时），按精准度逐级扩大范围
     results = []
     cookie = db.get_setting("pt_cookie")
-    cookie_expired = False
 
     if cookie:
         try:
-            # 中文关键词搜简介
-            if _contains_chinese(keyword):
-                results = await pt_client.search_web(keyword, cookie=cookie, search_area=1)
-
-            # 英文关键词（翻译后或原始）搜标题
-            en_keyword = translated_keyword or keyword
-            if not _contains_chinese(en_keyword):
-                en_results = await pt_client.search_web(en_keyword, cookie=cookie, search_area=0)
-                # 合并去重（按下载链接去重）
-                existing_urls = {r.torrent_url for r in results}
-                for r in en_results:
-                    if r.torrent_url not in existing_urls:
-                        results.append(r)
-
+            results = await _search_web_progressive(
+                pt_client, cookie, keyword, translated_keyword,
+            )
             if results:
                 logger.info("网页版搜索返回 %d 条结果", len(results))
         except CookieExpiredError:
             logger.warning("PT Cookie 已失效")
-            cookie_expired = True
             db.delete_setting("pt_cookie")
             results = []
-            # 异步通知 Owner
             try:
                 owner_id = context.bot_data["owner_id"]
                 await context.bot.send_message(
@@ -124,7 +172,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.warning("网页版搜索异常，降级到 RSS", exc_info=True)
 
-    # Step 3: 降级到 RSS（没有 Cookie 或 Cookie 失效或网页搜索无结果）
+    # Step 3: 降级到 RSS（没有 Cookie 或网页搜索无结果）
     if not results:
         rss_keyword = translated_keyword or keyword
         logger.info("RSS 搜索关键词: %s", rss_keyword)

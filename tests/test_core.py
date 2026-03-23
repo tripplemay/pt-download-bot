@@ -5,7 +5,7 @@ import os
 import pytest
 
 from bot.database import Database, User
-from bot.config import load_config, TelegramConfig, PTConfig, DownloadClientConfig
+from bot.config import load_config
 from bot.utils import truncate
 
 
@@ -252,23 +252,15 @@ class TestSettings:
 # Config tests
 # =====================================================================
 
-# Minimal required env vars for a valid config
+# Minimal required env vars for load_config (now only 2)
 REQUIRED_ENV = {
     "TELEGRAM_BOT_TOKEN": "test-token-123",
     "OWNER_TELEGRAM_ID": "111",
-    "PT_SITE_URL": "https://example.com",
-    "PT_PASSKEY": "abc123",
 }
 
-# All env vars that load_config reads, used to ensure a clean slate
+# All env vars that load_config reads
 ALL_CONFIG_KEYS = [
     "TELEGRAM_BOT_TOKEN", "OWNER_TELEGRAM_ID",
-    "PT_SITE_URL", "PT_PASSKEY", "PT_MAX_RESULTS", "PT_PAGE_SIZE", "PT_COOKIE",
-    "DOWNLOAD_CLIENT",
-    "DS_HOST", "DS_USERNAME", "DS_PASSWORD",
-    "QB_HOST", "QB_USERNAME", "QB_PASSWORD",
-    "TR_HOST", "TR_USERNAME", "TR_PASSWORD",
-    "TMDB_API_KEY",
 ]
 
 
@@ -282,15 +274,10 @@ def clean_env(monkeypatch):
 
 
 class TestLoadConfig:
-    def test_with_all_required_vars(self, clean_env):
-        tg, pt, dl, _ = load_config()
-        assert isinstance(tg, TelegramConfig)
-        assert tg.bot_token == "test-token-123"
-        assert tg.owner_id == 111
-        assert isinstance(pt, PTConfig)
-        assert pt.site_url == "https://example.com"
-        assert pt.passkey == "abc123"
-        assert isinstance(dl, DownloadClientConfig)
+    def test_with_required_vars(self, clean_env):
+        bot_token, owner_id = load_config()
+        assert bot_token == "test-token-123"
+        assert owner_id == 111
 
     def test_missing_telegram_bot_token(self, clean_env, monkeypatch):
         monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
@@ -301,43 +288,6 @@ class TestLoadConfig:
         monkeypatch.delenv("OWNER_TELEGRAM_ID")
         with pytest.raises(ValueError, match="OWNER_TELEGRAM_ID"):
             load_config()
-
-    def test_missing_pt_site_url(self, clean_env, monkeypatch):
-        monkeypatch.delenv("PT_SITE_URL")
-        with pytest.raises(ValueError, match="PT_SITE_URL"):
-            load_config()
-
-    def test_missing_pt_passkey(self, clean_env, monkeypatch):
-        monkeypatch.delenv("PT_PASSKEY")
-        with pytest.raises(ValueError, match="PT_PASSKEY"):
-            load_config()
-
-    def test_download_client_defaults_to_download_station(self, clean_env):
-        _, _, dl, _ = load_config()
-        assert dl.client_type == "download_station"
-
-    def test_download_client_custom_value(self, clean_env, monkeypatch):
-        monkeypatch.setenv("DOWNLOAD_CLIENT", "qbittorrent")
-        _, _, dl, _ = load_config()
-        assert dl.client_type == "qbittorrent"
-
-    def test_pt_max_results_default(self, clean_env):
-        _, pt, _, _ = load_config()
-        assert pt.max_results == 50
-
-    def test_pt_max_results_custom(self, clean_env, monkeypatch):
-        monkeypatch.setenv("PT_MAX_RESULTS", "100")
-        _, pt, _, _ = load_config()
-        assert pt.max_results == 100
-
-    def test_pt_page_size_default(self, clean_env):
-        _, pt, _, _ = load_config()
-        assert pt.page_size == 10
-
-    def test_pt_page_size_custom(self, clean_env, monkeypatch):
-        monkeypatch.setenv("PT_PAGE_SIZE", "25")
-        _, pt, _, _ = load_config()
-        assert pt.page_size == 25
 
 
 # =====================================================================

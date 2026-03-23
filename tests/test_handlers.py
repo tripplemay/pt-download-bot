@@ -158,7 +158,16 @@ class TestStartCommand:
         text = update.message.reply_text.call_args[0][0]
         assert "封禁" in text
 
-    async def test_owner(self, db_with_users):
+    async def test_owner_first_use_shows_guide(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users)
+        await start_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "首次使用" in text
+        assert "/setsite" in text
+
+    async def test_owner_after_setup(self, db_with_users):
+        db_with_users.set_setting("setup_completed", "true")
         update = make_update(user_id=111)
         context = make_context(db=db_with_users)
         await start_command(update, context)
@@ -930,24 +939,64 @@ class TestSearchCommandWebFirst:
         text = msg_mock.edit_text.call_args[0][0]
         assert "Torrent.Title.1" in text
 
-    async def test_web_search_merges_cn_and_en(self, db_with_users):
-        """Chinese keyword + TMDB translation triggers both cn and en web searches, merged."""
+    async def test_web_search_progressive_en_title_first(self, db_with_users):
+        """Chinese keyword + TMDB translation: EN title search runs first and is most precise."""
         db_with_users.set_setting("pt_cookie", "valid_cookie")
 
-        cn_results = [
-            TorrentResult(title="CN.Result", torrent_url="https://example.com/dl/cn1", size="1 GB"),
-        ]
         en_results = [
-            TorrentResult(title="EN.Result", torrent_url="https://example.com/dl/en1", size="2 GB"),
+            TorrentResult(title="EN.Result.1", torrent_url="https://example.com/dl/en1", size="2 GB"),
+            TorrentResult(title="EN.Result.2", torrent_url="https://example.com/dl/en2", size="3 GB"),
+            TorrentResult(title="EN.Result.3", torrent_url="https://example.com/dl/en3", size="4 GB"),
         ]
 
         pt_client = AsyncMock()
+        # EN title search returns enough results → no further searches needed
+        pt_client.search_web = AsyncMock(return_value=en_results)
+        pt_client.search = AsyncMock(return_value=[])
+
+        tmdb_client = AsyncMock()
+        tmdb_client.translate = AsyncMock(return_value="EnglishTitle")
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["测试电影"], page_size=10
+        )
+        context.bot_data["tmdb_client"] = tmdb_client
+
+        await search_command(update, context)
+
+        # Only EN title search needed (>= 3 results)
+        assert pt_client.search_web.await_count == 1
+        pt_client.search_web.assert_awaited_with("EnglishTitle", cookie="valid_cookie", search_area=0)
+        pt_client.search.assert_not_awaited()
+        assert len(user_cache[333]["results"]) == 3
+
+    async def test_web_search_progressive_fallback_to_cn(self, db_with_users):
+        """When EN title returns < 3 results, falls back to CN title then CN description."""
+        db_with_users.set_setting("pt_cookie", "valid_cookie")
+
+        call_count = 0
 
         async def mock_search_web(keyword, cookie=None, search_area=0):
-            if search_area == 1:
-                return cn_results
-            return en_results
+            nonlocal call_count
+            call_count += 1
+            if keyword == "EnglishTitle" and search_area == 0:
+                # EN title: only 1 result
+                return [TorrentResult(title="EN.1", torrent_url="https://x.com/dl/en1", size="1 GB")]
+            if keyword == "测试电影" and search_area == 0:
+                # CN title: 1 more result
+                return [TorrentResult(title="CN.Title.1", torrent_url="https://x.com/dl/cn1", size="2 GB")]
+            if keyword == "测试电影" and search_area == 1:
+                # CN description: 2 more results
+                return [
+                    TorrentResult(title="CN.Desc.1", torrent_url="https://x.com/dl/desc1", size="3 GB"),
+                    TorrentResult(title="CN.Desc.2", torrent_url="https://x.com/dl/desc2", size="4 GB"),
+                ]
+            return []
 
+        pt_client = AsyncMock()
         pt_client.search_web = AsyncMock(side_effect=mock_search_web)
         pt_client.search = AsyncMock(return_value=[])
 
@@ -964,13 +1013,13 @@ class TestSearchCommandWebFirst:
 
         await search_command(update, context)
 
-        # search_web called twice: once for CN (area=1), once for EN (area=0)
-        assert pt_client.search_web.await_count == 2
-        # RSS NOT called (web returned results)
+        # All 3 tiers called: EN title (1) + CN title (1) + CN desc (2)
+        assert pt_client.search_web.await_count == 3
         pt_client.search.assert_not_awaited()
-        # Both results merged
-        assert 333 in user_cache
         merged = user_cache[333]["results"]
-        titles = [r.title for r in merged]
-        assert "CN.Result" in titles
-        assert "EN.Result" in titles
+        titles = {r.title for r in merged}
+        assert "EN.1" in titles
+        assert "CN.Title.1" in titles
+        assert "CN.Desc.1" in titles
+        assert "CN.Desc.2" in titles
+        assert len(merged) == 4
