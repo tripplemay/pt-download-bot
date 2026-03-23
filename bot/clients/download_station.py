@@ -158,7 +158,7 @@ class DownloadStationClient(DownloadClientBase):
                     "api": "SYNO.DownloadStation2.Task",
                     "version": "2",
                     "method": "create",
-                    "uri": json.dumps([url]),
+                    "url": json.dumps([url]),
                     "destination": self._destination,
                     "type": "url",
                     "create_list": "false",
