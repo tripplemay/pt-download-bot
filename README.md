@@ -58,7 +58,7 @@ cd ptbot
 bash setup.sh
 
 # 4. 启动
-sudo docker-compose up -d
+sudo docker compose up -d
 ```
 
 在 Telegram 中找到你的 Bot，发送 `/start`，按引导完成配置。
@@ -148,33 +148,39 @@ sudo docker-compose up -d
 ## 常见问题
 
 **Bot 没有响应？**
-- 检查群晖是否能访问 Telegram（可能需要代理）
-- 查看日志：`docker-compose logs -f`
+- 检查群晖是否能访问 Telegram（可能需要路由器代理）
+- 查看日志：`cd /volume1/docker/ptbot && sudo docker compose logs -f`
 
 **搜索结果少？**
 - 发送 `/setcookie` 配置 Cookie 启用网页版搜索
 - 发送 `/settmdb` 配置 TMDB API Key 提升中文搜索精度
 
 **下载失败？**
-- 确认下载客户端（Download Station 等）正在运行
+- Download Station 地址用 `http://localhost:5000`（容器与群晖共享网络）
 - 发送 `/test` 测试连接
 - 发送 `/settings` 检查配置
 
 **支持哪些 PT 站？**
 - 所有基于 NexusPHP 的站点（CHDBits、HDChina、TTG 等）
 
+**支持哪些群晖版本？**
+- DSM 6 和 DSM 7 均支持，Download Station API 自动适配
+
 **如何更新？**
 ```bash
-cd /volume1/docker/ptbot
-docker-compose pull
-docker-compose up -d
+cd /volume1/docker/ptbot && sudo docker compose pull && sudo docker compose up -d
+```
+
+或重新运行一键安装（自动备份数据）：
+```bash
+curl -sSL https://raw.githubusercontent.com/tripplemay/pt-download-bot/main/install.sh | sudo bash
 ```
 
 ## 开发者
 
 ```bash
 # 本地构建运行
-docker-compose -f docker-compose.build.yml up -d
+docker compose -f docker-compose.build.yml up -d
 
 # 运行测试
 python3 -m pytest tests/
