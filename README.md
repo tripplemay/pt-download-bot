@@ -29,9 +29,21 @@ Telegram 用户 ──▶ Bot (Docker) ──▶ PT 站搜索
 
 其他配置（PT 站、下载客户端等）启动后在 Telegram 中通过 Bot 命令设置即可。
 
-## 群晖 Docker 部署
+## 一键安装（推荐）
 
-### 方法一：SSH 命令行（3 分钟）
+SSH 登录群晖后运行：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/tripplemay/pt-download-bot/main/install.sh | sudo bash
+```
+
+按提示输入 Bot Token 和 User ID，安装完成后打开 Telegram 发送 `/start` 继续配置。
+
+> 脚本会自动下载镜像并启动容器。覆盖安装时自动备份数据库和配置。
+
+## 其他部署方式
+
+### 方法一：SSH 命令行
 
 ```bash
 # 1. SSH 连接群晖
