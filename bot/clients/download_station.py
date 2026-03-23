@@ -159,8 +159,8 @@ class DownloadStationClient(DownloadClientBase):
                     "version": "2",
                     "method": "create",
                     "uri": json.dumps([url]),
-                    "destination": json.dumps(self._destination),
-                    "type": '"url"',
+                    "destination": self._destination,
+                    "type": "url",
                     "create_list": "false",
                     "_sid": self.sid,
                 }
@@ -190,8 +190,8 @@ class DownloadStationClient(DownloadClientBase):
                     "api": "SYNO.DownloadStation2.Task",
                     "version": "2",
                     "method": "create",
-                    "destination": json.dumps(self._destination),
-                    "type": '"file"',
+                    "destination": self._destination,
+                    "type": "file",
                     "create_list": "false",
                     "_sid": self.sid,
                 }
