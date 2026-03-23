@@ -238,7 +238,7 @@ class TestDownloadStationClient:
         )
 
         result = await ds_client._request_with_retry(
-            "GET", "http://ds-host:5000/webapi/test", params={"_sid": "old_sid"}
+            "GET", params={"_sid": "old_sid"}
         )
         assert result["success"] is True
         assert ds_client.sid == "new_sid"
