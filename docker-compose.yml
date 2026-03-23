@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  pt-bot:
+    build: .
+    container_name: pt-download-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    network_mode: host
+    environment:
+      - TZ=Asia/Shanghai
