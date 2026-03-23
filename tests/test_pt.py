@@ -509,40 +509,39 @@ class TestTorrentsPageParser:
 class TestSearchWeb:
 
     async def test_search_web_with_cookie(self):
-        with patch("bot.pt.nexusphp.httpx.AsyncClient"):
-            site = NexusPHPSite(
-                base_url="https://example.com",
-                passkey="testkey123",
-                cookie="uid=1; pass=abc",
-            )
+        site = _make_site()
         site._client = AsyncMock()
-        site._client.get.return_value = _mock_response(text=SAMPLE_TORRENTS_HTML)
+        mock_resp = _mock_response(text=SAMPLE_TORRENTS_HTML)
+        mock_resp.url = "https://example.com/torrents.php"
+        site._client.get.return_value = mock_resp
 
-        results = await site.search_web("test")
+        results = await site.search_web("test", cookie="uid=1; pass=abc")
 
         assert len(results) == 2
         assert results[0].title == "Test Movie 2024 BluRay 1080p"
+        # Verify cookie passed in headers
+        call_kwargs = site._client.get.call_args
+        assert call_kwargs.kwargs.get("headers", {}).get("Cookie") == "uid=1; pass=abc"
 
-    async def test_search_web_no_cookie(self):
+    async def test_search_web_cookie_expired(self):
+        from bot.pt.nexusphp import CookieExpiredError
         site = _make_site()
         site._client = AsyncMock()
+        mock_resp = _mock_response(text='<title>Login</title>')
+        mock_resp.url = "https://example.com/login.php"
+        site._client.get.return_value = mock_resp
 
-        results = await site.search_web("test")
-
-        assert results == []
-        site._client.get.assert_not_called()
+        with pytest.raises(CookieExpiredError):
+            await site.search_web("test", cookie="expired_cookie")
 
     async def test_search_web_passes_search_area(self):
-        with patch("bot.pt.nexusphp.httpx.AsyncClient"):
-            site = NexusPHPSite(
-                base_url="https://example.com",
-                passkey="testkey123",
-                cookie="uid=1; pass=abc",
-            )
+        site = _make_site()
         site._client = AsyncMock()
-        site._client.get.return_value = _mock_response(text=SAMPLE_TORRENTS_HTML)
+        mock_resp = _mock_response(text=SAMPLE_TORRENTS_HTML)
+        mock_resp.url = "https://example.com/torrents.php"
+        site._client.get.return_value = mock_resp
 
-        await site.search_web("test", search_area=1)
+        await site.search_web("test", cookie="uid=1; pass=abc", search_area=1)
 
         call_kwargs = site._client.get.call_args
         params = call_kwargs.kwargs.get("params") or call_kwargs[1].get("params", {})

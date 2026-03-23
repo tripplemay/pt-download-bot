@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
+from bot.pt.nexusphp import CookieExpiredError
 from bot.utils import truncate
 
 logger = logging.getLogger(__name__)
@@ -62,57 +63,84 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = " ".join(context.args)
     pt_client = context.bot_data["pt_client"]
     tmdb_client = context.bot_data.get("tmdb_client")
+    db = context.bot_data["db"]
     page_size = context.bot_data.get("page_size", 10)
 
     msg = await update.message.reply_text(f"正在搜索: {keyword} ...")
 
-    search_keyword = keyword
-    translated = False
-
-    # 中文关键词 → 先用 TMDB 翻译为英文
+    # Step 1: TMDB 翻译中文 → 英文
+    translated_keyword = None
     if _contains_chinese(keyword) and tmdb_client:
         try:
-            english_name = await tmdb_client.translate(keyword)
-            if english_name:
-                search_keyword = english_name
-                translated = True
-                await msg.edit_text(f"正在搜索: {keyword} → {english_name} ...")
+            translated_keyword = await tmdb_client.translate(keyword)
         except Exception:
-            logger.warning("TMDB 翻译失败，使用原始关键词", exc_info=True)
+            logger.warning("TMDB 翻译异常", exc_info=True)
 
-    # 第一步：RSS 搜索
+        if translated_keyword:
+            logger.info("TMDB 翻译: %s → %s", keyword, translated_keyword)
+            try:
+                await msg.edit_text(f"正在搜索: {keyword} → {translated_keyword} ...")
+            except Exception:
+                pass
+
+    # Step 2: 尝试网页版搜索（结果完整）
     results = []
-    try:
-        results = await pt_client.search(search_keyword)
-    except Exception:
-        logger.exception("RSS 搜索失败")
+    cookie = db.get_setting("pt_cookie")
+    cookie_expired = False
 
-    # 第二步：结果不足时，降级到网页版搜索
-    if len(results) < 3:
+    if cookie:
         try:
-            web_results = await pt_client.search_web(keyword, search_area=1)
-            if len(web_results) > len(results):
-                results = web_results
-                logger.info("网页版搜索补充了 %d 条结果", len(web_results))
-        except Exception:
-            logger.warning("网页版搜索失败", exc_info=True)
+            # 中文关键词搜简介
+            if _contains_chinese(keyword):
+                results = await pt_client.search_web(keyword, cookie=cookie, search_area=1)
 
-    # 如果翻译后的 RSS 结果也不好，再尝试用原始中文做网页搜索
-    if translated and len(results) < 3:
+            # 英文关键词（翻译后或原始）搜标题
+            en_keyword = translated_keyword or keyword
+            if not _contains_chinese(en_keyword):
+                en_results = await pt_client.search_web(en_keyword, cookie=cookie, search_area=0)
+                # 合并去重（按下载链接去重）
+                existing_urls = {r.torrent_url for r in results}
+                for r in en_results:
+                    if r.torrent_url not in existing_urls:
+                        results.append(r)
+
+            if results:
+                logger.info("网页版搜索返回 %d 条结果", len(results))
+        except CookieExpiredError:
+            logger.warning("PT Cookie 已失效")
+            cookie_expired = True
+            db.delete_setting("pt_cookie")
+            results = []
+            # 异步通知 Owner
+            try:
+                owner_id = context.bot_data["owner_id"]
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text="PT 站 Cookie 已失效，已自动降级到 RSS 搜索（结果有限）。\n"
+                         "请使用 /setcookie 更新 Cookie。",
+                )
+            except Exception:
+                pass
+        except Exception:
+            logger.warning("网页版搜索异常，降级到 RSS", exc_info=True)
+
+    # Step 3: 降级到 RSS（没有 Cookie 或 Cookie 失效或网页搜索无结果）
+    if not results:
+        rss_keyword = translated_keyword or keyword
+        logger.info("RSS 搜索关键词: %s", rss_keyword)
         try:
-            web_results = await pt_client.search_web(keyword, search_area=0)
-            if len(web_results) > len(results):
-                results = web_results
+            results = await pt_client.search(rss_keyword)
+            logger.info("RSS 搜索返回 %d 条结果", len(results))
         except Exception:
-            pass
+            logger.exception("RSS 搜索失败")
 
+    # 展示结果
+    user_id = update.effective_user.id
     if not results:
         await msg.edit_text("未找到相关种子，请尝试其他关键词。")
-        user_id = update.effective_user.id
         user_cache[user_id] = {"results": [], "page": 0, "page_size": page_size}
         return
 
-    user_id = update.effective_user.id
     user_cache[user_id] = {
         "results": results,
         "page": 0,

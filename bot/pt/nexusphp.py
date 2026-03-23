@@ -13,6 +13,11 @@ from bot.pt.base import PTSiteBase, TorrentResult
 logger = logging.getLogger(__name__)
 
 
+class CookieExpiredError(Exception):
+    """PT 站 Cookie 已失效。"""
+    pass
+
+
 def _bytes_to_human(n: int) -> str:
     """将字节数转换为人类可读格式 (KB/MB/GB/TB)"""
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -148,17 +153,13 @@ def _parse_torrents_html(html: str, base_url: str, passkey: str) -> List[Torrent
 class NexusPHPSite(PTSiteBase):
     """NexusPHP 站点通用实现，通过 RSS 接口搜索和下载种子"""
 
-    def __init__(self, base_url: str, passkey: str, cookie: str = "") -> None:
+    def __init__(self, base_url: str, passkey: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.passkey = passkey
-        self.cookie = cookie
-        headers = {"User-Agent": "PTBot/1.0"}
-        if cookie:
-            headers["Cookie"] = cookie
         self._client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
-            headers=headers,
+            headers={"User-Agent": "PTBot/1.0"},
         )
 
     # ------------------------------------------------------------------
@@ -222,23 +223,30 @@ class NexusPHPSite(PTSiteBase):
     # ------------------------------------------------------------------
     # 网页搜索（降级方案）
     # ------------------------------------------------------------------
-    async def search_web(self, keyword: str, search_area: int = 1) -> List[TorrentResult]:
+    async def search_web(self, keyword: str, cookie: str, search_area: int = 0) -> List[TorrentResult]:
         """通过网页版 torrents.php 搜索（需要 Cookie）。
 
         search_area: 0=标题, 1=简介/副标题
-        这是 RSS 搜索的降级方案，用于中文搜索。
-        """
-        if not self.cookie:
-            return []
+        返回结果比 RSS 完整得多（可达 100+ 条）。
 
+        Raises:
+            CookieExpiredError: Cookie 已失效
+        """
         url = f"{self.base_url}/torrents.php"
         params = {
             "search": keyword,
             "search_area": str(search_area),
         }
-        resp = await self._client.get(url, params=params)
+        headers = {"Cookie": cookie}
+        resp = await self._client.get(url, params=params, headers=headers)
         resp.raise_for_status()
-        return _parse_torrents_html(resp.text, self.base_url, self.passkey)
+
+        html = resp.text
+        # 检测 Cookie 失效：被重定向到登录页面或页面包含登录表单
+        if "login.php" in str(resp.url) or 'name="username"' in html or "<title>Login" in html:
+            raise CookieExpiredError("Cookie 已失效，请重新设置")
+
+        return _parse_torrents_html(html, self.base_url, self.passkey)
 
     # ------------------------------------------------------------------
     # 下载种子

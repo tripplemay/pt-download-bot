@@ -1,9 +1,12 @@
 """管理员命令：/users, /pending, /ban, /unban"""
 
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_owner
+from bot.pt.nexusphp import CookieExpiredError
 
 ROLE_EMOJI = {
     "owner": "👑",
@@ -125,5 +128,87 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"操作失败：用户 <code>{target_id}</code> 不存在或当前未被封禁。",
+            parse_mode="HTML",
+        )
+
+
+logger = logging.getLogger(__name__)
+
+
+@require_owner
+async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setcookie <cookie值> — 设置 PT 站 Cookie 以启用网页版搜索。"""
+    db = context.bot_data["db"]
+    pt_client = context.bot_data["pt_client"]
+
+    # 立即删除包含 Cookie 的消息（保护安全）
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_chat.id,
+            message_id=update.message.message_id,
+        )
+    except Exception:
+        pass  # 可能没有删除权限
+
+    if not context.args:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                "用法：/setcookie &lt;Cookie值&gt;\n\n"
+                "获取方法：浏览器登录 PT 站 → F12 → Network → "
+                "点击任意请求 → 复制 Cookie 头的值"
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    cookie = " ".join(context.args)
+    msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="正在验证 Cookie...",
+    )
+
+    # 验证 Cookie：尝试用它请求 torrents.php
+    try:
+        results = await pt_client.search_web("test", cookie=cookie, search_area=0)
+        # 如果没抛 CookieExpiredError，说明 Cookie 有效
+        db.set_setting("pt_cookie", cookie)
+        await msg.edit_text(
+            "Cookie 已保存并验证通过！\n"
+            "网页版搜索已启用（搜索结果将更完整）。"
+        )
+        logger.info("PT Cookie 已更新")
+    except CookieExpiredError:
+        await msg.edit_text(
+            "Cookie 无效，请检查后重试。\n\n"
+            "获取方法：浏览器登录 PT 站 → F12 → Network → "
+            "点击任意请求 → 复制 Cookie 头的值"
+        )
+    except Exception:
+        logger.exception("Cookie 验证异常")
+        await msg.edit_text("Cookie 验证时出错，请稍后重试。")
+
+
+@require_owner
+async def cookiestatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cookiestatus — 查看 Cookie 状态。"""
+    db = context.bot_data["db"]
+    cookie = db.get_setting("pt_cookie")
+
+    if cookie:
+        updated_at = db.get_setting_updated_at("pt_cookie") or "未知"
+        await update.message.reply_text(
+            f"<b>Cookie 状态</b>\n\n"
+            f"状态：已配置\n"
+            f"设置时间：{updated_at}\n"
+            f"搜索模式：网页版（结果完整）",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            "<b>Cookie 状态</b>\n\n"
+            "状态：未配置\n"
+            "搜索模式：RSS（结果有限，最多约10条）\n\n"
+            "使用 /setcookie 配置 Cookie 以获取完整搜索结果。",
             parse_mode="HTML",
         )

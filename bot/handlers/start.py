@@ -168,19 +168,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user.role == "owner":
         text = (
             base_commands
-            + "/search — 搜索种子\n"
-            + "/rss — RSS 订阅管理\n"
+            + "/s 关键词 — 搜索种子\n"
+            + "/dl 序号 — 下载\n"
+            + "/more — 下一页\n"
+            + "/status — 查看下载任务\n"
             + "\n<b>管理命令</b>\n\n"
             + "/users — 查看所有用户\n"
             + "/pending — 查看待审批用户\n"
             + "/ban &lt;用户ID&gt; — 封禁用户\n"
             + "/unban &lt;用户ID&gt; — 解封用户\n"
+            + "/setcookie — 设置 PT 站 Cookie\n"
+            + "/cookiestatus — 查看 Cookie 状态\n"
+            + "/test — 测试连接\n"
         )
     else:
         text = (
             base_commands
-            + "/search — 搜索种子\n"
-            + "/rss — RSS 订阅管理\n"
+            + "/s 关键词 — 搜索种子\n"
+            + "/dl 序号 — 下载\n"
+            + "/more — 下一页\n"
+            + "/status — 查看下载任务\n"
         )
+
+    # Cookie 未配置提示（仅 Owner 可见）
+    if user and user.role == "owner":
+        cookie = db.get_setting("pt_cookie")
+        if not cookie:
+            text += (
+                "\n<i>提示：网页版搜索未启用，搜索结果可能较少。"
+                "使用 /setcookie 配置 Cookie 以获取完整结果。</i>\n"
+            )
 
     await update.message.reply_text(text, parse_mode="HTML")

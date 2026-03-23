@@ -47,6 +47,12 @@ class Database:
                 torrent_size  TEXT,
                 created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key       TEXT PRIMARY KEY,
+                value     TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         self.conn.commit()
@@ -201,3 +207,40 @@ class Database:
             (telegram_id,),
         )
         return cur.fetchone() is not None
+
+    # ------------------------------------------------------------------
+    # 设置存储
+    # ------------------------------------------------------------------
+
+    def get_setting(self, key: str) -> Optional[str]:
+        """获取设置值。"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str):
+        """设置或更新值。"""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+            """,
+            (key, value),
+        )
+        self.conn.commit()
+
+    def delete_setting(self, key: str):
+        """删除设置。"""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM settings WHERE key = ?", (key,))
+        self.conn.commit()
+
+    def get_setting_updated_at(self, key: str) -> Optional[str]:
+        """获取设置的更新时间。"""
+        cur = self.conn.cursor()
+        cur.execute("SELECT updated_at FROM settings WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row["updated_at"] if row else None

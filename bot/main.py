@@ -19,7 +19,7 @@ from bot.middleware import require_auth, require_owner
 from bot.handlers.search import search_command, more_command
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
-from bot.handlers.admin import users_command, pending_command, ban_command, unban_command
+from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
 
 logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -102,8 +102,13 @@ def main():
     db = Database(db_path)
     db.init_owner(telegram_cfg.owner_id)
 
+    # 同步 .env 中的 Cookie 到数据库（兼容旧配置）
+    if not db.get_setting("pt_cookie") and pt_cfg.cookie:
+        db.set_setting("pt_cookie", pt_cfg.cookie)
+        logger.info("已从环境变量同步 Cookie 到数据库")
+
     # 3. 初始化 PT 站客户端
-    pt_client = NexusPHPSite(pt_cfg.site_url, pt_cfg.passkey, cookie=pt_cfg.cookie)
+    pt_client = NexusPHPSite(pt_cfg.site_url, pt_cfg.passkey)
 
     # 4. 初始化下载客户端
     dl_client = create_download_client(dl_cfg)
@@ -140,6 +145,8 @@ def main():
     app.add_handler(CommandHandler("pending", pending_command))
     app.add_handler(CommandHandler("ban", ban_command))
     app.add_handler(CommandHandler("unban", unban_command))
+    app.add_handler(CommandHandler("setcookie", setcookie_command))
+    app.add_handler(CommandHandler("cookiestatus", cookiestatus_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
 
     # 8. 启动轮询

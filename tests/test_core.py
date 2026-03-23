@@ -218,6 +218,36 @@ class TestIsOwner:
         assert db_with_users.is_owner(999) is False
 
 
+class TestSettings:
+    def test_get_setting_nonexistent(self, tmp_db):
+        assert tmp_db.get_setting("no_such_key") is None
+
+    def test_set_and_get_setting(self, tmp_db):
+        tmp_db.set_setting("pt_cookie", "uid=1; pass=abc")
+        assert tmp_db.get_setting("pt_cookie") == "uid=1; pass=abc"
+
+    def test_set_setting_overwrite(self, tmp_db):
+        tmp_db.set_setting("key1", "value1")
+        tmp_db.set_setting("key1", "value2")
+        assert tmp_db.get_setting("key1") == "value2"
+
+    def test_delete_setting(self, tmp_db):
+        tmp_db.set_setting("key1", "value1")
+        tmp_db.delete_setting("key1")
+        assert tmp_db.get_setting("key1") is None
+
+    def test_delete_nonexistent(self, tmp_db):
+        tmp_db.delete_setting("no_such_key")  # should not raise
+
+    def test_get_setting_updated_at(self, tmp_db):
+        tmp_db.set_setting("key1", "value1")
+        updated_at = tmp_db.get_setting_updated_at("key1")
+        assert updated_at is not None
+
+    def test_get_setting_updated_at_nonexistent(self, tmp_db):
+        assert tmp_db.get_setting_updated_at("no_such_key") is None
+
+
 # =====================================================================
 # Config tests
 # =====================================================================

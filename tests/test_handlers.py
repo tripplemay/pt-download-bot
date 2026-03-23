@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from bot.middleware import require_auth, require_owner
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
-from bot.handlers.admin import users_command, pending_command, ban_command, unban_command
+from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
 from bot.handlers.search import search_command, more_command, _format_results, user_cache
 from bot.handlers.download import download_command
 from bot.pt.base import TorrentResult
+from bot.pt.nexusphp import CookieExpiredError
 
 from tests.conftest import make_update, make_context
 
@@ -324,7 +325,7 @@ class TestHelpCommand:
         context = make_context(db=db_with_users)
         await help_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "/search" in text
+        assert "/s" in text
         assert "/users" not in text
 
     async def test_banned_user(self, db_with_users):
@@ -734,3 +735,242 @@ class TestDownloadCommand:
 
         # Owner should NOT receive notification about own download
         context.bot.send_message.assert_not_awaited()
+
+
+# ===========================================================================
+# bot/handlers/admin.py — setcookie_command
+# ===========================================================================
+
+class TestSetcookieCommand:
+
+    async def test_no_args(self, db_with_users):
+        pt_client = AsyncMock()
+        update = make_update(user_id=111)
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = 111
+        update.message.message_id = 42
+        context = make_context(db=db_with_users, pt_client=pt_client, args=[])
+        context.bot.delete_message = AsyncMock()
+        context.bot.send_message = AsyncMock()
+
+        await setcookie_command(update, context)
+
+        # Message deleted for security
+        context.bot.delete_message.assert_awaited_once()
+        # Usage message sent
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.call_args[1].get("text") or context.bot.send_message.call_args[0][0] if context.bot.send_message.call_args[0] else context.bot.send_message.call_args[1]["text"]
+        assert "用法" in text or "setcookie" in text
+
+    async def test_valid_cookie(self, db_with_users):
+        pt_client = AsyncMock()
+        pt_client.search_web = AsyncMock(return_value=[])
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=111)
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = 111
+        update.message.message_id = 42
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["uid=1;", "pass=abc"])
+        context.bot.delete_message = AsyncMock()
+        context.bot.send_message = AsyncMock(return_value=msg_mock)
+
+        await setcookie_command(update, context)
+
+        # Cookie validated via search_web
+        pt_client.search_web.assert_awaited_once()
+        # Success message
+        msg_mock.edit_text.assert_awaited_once()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "已保存并验证通过" in text or "验证通过" in text
+        # Cookie saved in DB
+        assert db_with_users.get_setting("pt_cookie") == "uid=1; pass=abc"
+
+    async def test_invalid_cookie(self, db_with_users):
+        pt_client = AsyncMock()
+        pt_client.search_web = AsyncMock(side_effect=CookieExpiredError("expired"))
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=111)
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = 111
+        update.message.message_id = 42
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["bad_cookie"])
+        context.bot.delete_message = AsyncMock()
+        context.bot.send_message = AsyncMock(return_value=msg_mock)
+
+        await setcookie_command(update, context)
+
+        msg_mock.edit_text.assert_awaited_once()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "无效" in text
+        # Cookie NOT saved
+        assert db_with_users.get_setting("pt_cookie") is None
+
+    async def test_non_owner_blocked(self, db_with_users):
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=["some_cookie"])
+
+        await setcookie_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "管理员" in text
+
+
+# ===========================================================================
+# bot/handlers/admin.py — cookiestatus_command
+# ===========================================================================
+
+class TestCookiestatusCommand:
+
+    async def test_cookie_configured(self, db_with_users):
+        db_with_users.set_setting("pt_cookie", "uid=1; pass=abc")
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users)
+
+        await cookiestatus_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "已配置" in text
+
+    async def test_cookie_not_configured(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users)
+
+        await cookiestatus_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "未配置" in text
+
+
+# ===========================================================================
+# bot/handlers/search.py — search_command (web-first strategy)
+# ===========================================================================
+
+class TestSearchCommandWebFirst:
+
+    async def test_web_search_primary_when_cookie_exists(self, db_with_users):
+        """When cookie is set, search_web is called and RSS search is NOT called."""
+        db_with_users.set_setting("pt_cookie", "valid_cookie")
+        results = [_make_torrent(i) for i in range(1, 4)]
+        pt_client = AsyncMock()
+        pt_client.search_web = AsyncMock(return_value=results)
+        pt_client.search = AsyncMock(return_value=[])
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["testmovie"], page_size=10
+        )
+
+        await search_command(update, context)
+
+        # Web search was called
+        pt_client.search_web.assert_awaited()
+        # RSS search was NOT called (web returned results)
+        pt_client.search.assert_not_awaited()
+        # Results displayed
+        msg_mock.edit_text.assert_awaited()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "Torrent.Title.1" in text
+
+    async def test_fallback_to_rss_when_no_cookie(self, db_with_users):
+        """When no cookie is set, RSS search is used."""
+        # Ensure no cookie
+        assert db_with_users.get_setting("pt_cookie") is None
+
+        results = [_make_torrent(1)]
+        pt_client = AsyncMock()
+        pt_client.search_web = AsyncMock(return_value=[])
+        pt_client.search = AsyncMock(return_value=results)
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["testmovie"], page_size=10
+        )
+
+        await search_command(update, context)
+
+        # Web search was NOT called (no cookie)
+        pt_client.search_web.assert_not_awaited()
+        # RSS search was called
+        pt_client.search.assert_awaited_once()
+
+    async def test_cookie_expired_fallback_to_rss(self, db_with_users):
+        """When search_web raises CookieExpiredError, cookie is deleted and RSS fallback used."""
+        db_with_users.set_setting("pt_cookie", "expired_cookie")
+        rss_results = [_make_torrent(1)]
+        pt_client = AsyncMock()
+        pt_client.search_web = AsyncMock(side_effect=CookieExpiredError("expired"))
+        pt_client.search = AsyncMock(return_value=rss_results)
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["testmovie"], page_size=10
+        )
+
+        await search_command(update, context)
+
+        # Cookie deleted from DB
+        assert db_with_users.get_setting("pt_cookie") is None
+        # Owner notified about cookie expiry
+        context.bot.send_message.assert_awaited_once()
+        notify_kwargs = context.bot.send_message.call_args[1]
+        assert notify_kwargs["chat_id"] == 111
+        assert "Cookie" in notify_kwargs["text"] or "cookie" in notify_kwargs["text"].lower()
+        # RSS fallback used
+        pt_client.search.assert_awaited_once()
+        # Results displayed
+        msg_mock.edit_text.assert_awaited()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "Torrent.Title.1" in text
+
+    async def test_web_search_merges_cn_and_en(self, db_with_users):
+        """Chinese keyword + TMDB translation triggers both cn and en web searches, merged."""
+        db_with_users.set_setting("pt_cookie", "valid_cookie")
+
+        cn_results = [
+            TorrentResult(title="CN.Result", torrent_url="https://example.com/dl/cn1", size="1 GB"),
+        ]
+        en_results = [
+            TorrentResult(title="EN.Result", torrent_url="https://example.com/dl/en1", size="2 GB"),
+        ]
+
+        pt_client = AsyncMock()
+
+        async def mock_search_web(keyword, cookie=None, search_area=0):
+            if search_area == 1:
+                return cn_results
+            return en_results
+
+        pt_client.search_web = AsyncMock(side_effect=mock_search_web)
+        pt_client.search = AsyncMock(return_value=[])
+
+        tmdb_client = AsyncMock()
+        tmdb_client.translate = AsyncMock(return_value="EnglishTitle")
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["测试电影"], page_size=10
+        )
+        context.bot_data["tmdb_client"] = tmdb_client
+
+        await search_command(update, context)
+
+        # search_web called twice: once for CN (area=1), once for EN (area=0)
+        assert pt_client.search_web.await_count == 2
+        # RSS NOT called (web returned results)
+        pt_client.search.assert_not_awaited()
+        # Both results merged
+        assert 333 in user_cache
+        merged = user_cache[333]["results"]
+        titles = [r.title for r in merged]
+        assert "CN.Result" in titles
+        assert "EN.Result" in titles
