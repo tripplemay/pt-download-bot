@@ -185,10 +185,12 @@ class TestMainFunction:
 
         with patch("bot.main.ApplicationBuilder", return_value=mock_builder), \
              patch("bot.main.NexusPHPSite") as mock_pt, \
-             patch("bot.main.create_download_client") as mock_dl:
+             patch("bot.main.create_download_client") as mock_dl, \
+             patch("bot.main.TMDBClient") as mock_tmdb:
 
             mock_pt.return_value = MagicMock()
             mock_dl.return_value = MagicMock()
+            mock_tmdb.return_value = MagicMock()
 
             from bot.main import main
             main()
@@ -205,4 +207,5 @@ class TestMainFunction:
             assert "db" in mock_app.bot_data
             assert "pt_client" in mock_app.bot_data
             assert "dl_client" in mock_app.bot_data
+            assert "tmdb_client" in mock_app.bot_data
             assert mock_app.bot_data["owner_id"] == 111

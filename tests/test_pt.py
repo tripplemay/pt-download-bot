@@ -425,3 +425,150 @@ class TestPTSiteBase:
 
     def test_nexusphp_is_subclass(self):
         assert issubclass(NexusPHPSite, PTSiteBase)
+
+
+# ===================================================================
+# _TorrentsPageParser & _parse_torrents_html
+# ===================================================================
+
+from bot.pt.nexusphp import _TorrentsPageParser, _parse_torrents_html
+
+SAMPLE_TORRENTS_HTML = '''
+<table class="torrents">
+<tr>
+  <td class="rowfollow">1</td>
+  <td>
+    <a href="details.php?id=123">Test Movie 2024 BluRay 1080p</a>
+    <br/>中文副标题
+    <a href="download.php?id=123"><img class="download" /></a>
+  </td>
+  <td>14.37 GB</td>
+</tr>
+<tr>
+  <td class="rowfollow">2</td>
+  <td>
+    <a href="details.php?id=456">Another Movie 2024 4K</a>
+    <a href="download.php?id=456"><img class="download" /></a>
+  </td>
+  <td>35.66 GB</td>
+</tr>
+</table>
+'''
+
+
+class TestTorrentsPageParser:
+
+    def test_parse_html_extracts_entries(self):
+        results = _parse_torrents_html(
+            SAMPLE_TORRENTS_HTML, "https://example.com", "pk123"
+        )
+        assert len(results) == 2
+
+    def test_parse_html_title_correct(self):
+        results = _parse_torrents_html(
+            SAMPLE_TORRENTS_HTML, "https://example.com", "pk123"
+        )
+        assert results[0].title == "Test Movie 2024 BluRay 1080p"
+
+    def test_parse_html_download_link_absolute(self):
+        results = _parse_torrents_html(
+            SAMPLE_TORRENTS_HTML, "https://example.com", "pk123"
+        )
+        for r in results:
+            assert r.torrent_url.startswith("https://example.com/")
+
+    def test_parse_html_passkey_appended(self):
+        results = _parse_torrents_html(
+            SAMPLE_TORRENTS_HTML, "https://example.com", "pk123"
+        )
+        for r in results:
+            assert "passkey=pk123" in r.torrent_url
+
+    def test_parse_html_size_extracted(self):
+        results = _parse_torrents_html(
+            SAMPLE_TORRENTS_HTML, "https://example.com", "pk123"
+        )
+        assert results[0].size == "14.37 GB"
+        assert results[1].size == "35.66 GB"
+
+    def test_parse_html_empty_table(self):
+        html = '<table class="torrents"></table>'
+        results = _parse_torrents_html(html, "https://example.com", "pk123")
+        assert results == []
+
+    def test_parse_html_no_table(self):
+        html = "<html><body>No torrents here</body></html>"
+        results = _parse_torrents_html(html, "https://example.com", "pk123")
+        assert results == []
+
+
+# ===================================================================
+# NexusPHPSite.search_web
+# ===================================================================
+
+class TestSearchWeb:
+
+    async def test_search_web_with_cookie(self):
+        with patch("bot.pt.nexusphp.httpx.AsyncClient"):
+            site = NexusPHPSite(
+                base_url="https://example.com",
+                passkey="testkey123",
+                cookie="uid=1; pass=abc",
+            )
+        site._client = AsyncMock()
+        site._client.get.return_value = _mock_response(text=SAMPLE_TORRENTS_HTML)
+
+        results = await site.search_web("test")
+
+        assert len(results) == 2
+        assert results[0].title == "Test Movie 2024 BluRay 1080p"
+
+    async def test_search_web_no_cookie(self):
+        site = _make_site()
+        site._client = AsyncMock()
+
+        results = await site.search_web("test")
+
+        assert results == []
+        site._client.get.assert_not_called()
+
+    async def test_search_web_passes_search_area(self):
+        with patch("bot.pt.nexusphp.httpx.AsyncClient"):
+            site = NexusPHPSite(
+                base_url="https://example.com",
+                passkey="testkey123",
+                cookie="uid=1; pass=abc",
+            )
+        site._client = AsyncMock()
+        site._client.get.return_value = _mock_response(text=SAMPLE_TORRENTS_HTML)
+
+        await site.search_web("test", search_area=1)
+
+        call_kwargs = site._client.get.call_args
+        params = call_kwargs.kwargs.get("params") or call_kwargs[1].get("params", {})
+        assert params["search_area"] == "1"
+
+
+# ===================================================================
+# _contains_chinese
+# ===================================================================
+
+from bot.handlers.search import _contains_chinese
+
+
+class TestContainsChinese:
+
+    def test_chinese_text(self):
+        assert _contains_chinese("王冠") is True
+
+    def test_english_text(self):
+        assert _contains_chinese("Crown") is False
+
+    def test_mixed_text(self):
+        assert _contains_chinese("王冠 Crown") is True
+
+    def test_empty_text(self):
+        assert _contains_chinese("") is False
+
+    def test_numbers(self):
+        assert _contains_chinese("123") is False

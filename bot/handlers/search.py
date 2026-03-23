@@ -1,6 +1,7 @@
 """搜索命令处理 — /search, /s, /more"""
 
 import logging
+import re
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 # 每个用户的搜索结果与分页状态
 # {user_id: {"results": [TorrentResult, ...], "page": int, "page_size": int}}
 user_cache: dict = {}
+
+
+def _contains_chinese(text: str) -> bool:
+    """检测文本是否包含中文字符。"""
+    return bool(re.search(r'[\u4e00-\u9fff]', text))
 
 
 def _format_results(results: list, page: int, page_size: int) -> str:
@@ -55,15 +61,55 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyword = " ".join(context.args)
     pt_client = context.bot_data["pt_client"]
+    tmdb_client = context.bot_data.get("tmdb_client")
     page_size = context.bot_data.get("page_size", 10)
 
-    await update.message.reply_text(f"正在搜索: {keyword} ...")
+    msg = await update.message.reply_text(f"正在搜索: {keyword} ...")
 
+    search_keyword = keyword
+    translated = False
+
+    # 中文关键词 → 先用 TMDB 翻译为英文
+    if _contains_chinese(keyword) and tmdb_client:
+        try:
+            english_name = await tmdb_client.translate(keyword)
+            if english_name:
+                search_keyword = english_name
+                translated = True
+                await msg.edit_text(f"正在搜索: {keyword} → {english_name} ...")
+        except Exception:
+            logger.warning("TMDB 翻译失败，使用原始关键词", exc_info=True)
+
+    # 第一步：RSS 搜索
+    results = []
     try:
-        results = await pt_client.search(keyword)
+        results = await pt_client.search(search_keyword)
     except Exception:
-        logger.exception("搜索失败")
-        await update.message.reply_text("搜索出错，请稍后重试。")
+        logger.exception("RSS 搜索失败")
+
+    # 第二步：结果不足时，降级到网页版搜索
+    if len(results) < 3:
+        try:
+            web_results = await pt_client.search_web(keyword, search_area=1)
+            if len(web_results) > len(results):
+                results = web_results
+                logger.info("网页版搜索补充了 %d 条结果", len(web_results))
+        except Exception:
+            logger.warning("网页版搜索失败", exc_info=True)
+
+    # 如果翻译后的 RSS 结果也不好，再尝试用原始中文做网页搜索
+    if translated and len(results) < 3:
+        try:
+            web_results = await pt_client.search_web(keyword, search_area=0)
+            if len(web_results) > len(results):
+                results = web_results
+        except Exception:
+            pass
+
+    if not results:
+        await msg.edit_text("未找到相关种子，请尝试其他关键词。")
+        user_id = update.effective_user.id
+        user_cache[user_id] = {"results": [], "page": 0, "page_size": page_size}
         return
 
     user_id = update.effective_user.id
@@ -74,7 +120,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     text = _format_results(results, 0, page_size)
-    await update.message.reply_text(text)
+    await msg.edit_text(text)
 
 
 @require_auth

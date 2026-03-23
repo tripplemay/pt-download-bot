@@ -14,6 +14,7 @@ class TelegramConfig:
 class PTConfig:
     site_url: str
     passkey: str
+    cookie: str = ""        # for web search fallback
     max_results: int = 50
     page_size: int = 10
 
@@ -32,7 +33,7 @@ class DownloadClientConfig:
     tr_password: str = ""
 
 
-def load_config() -> tuple[TelegramConfig, PTConfig, DownloadClientConfig]:
+def load_config() -> tuple[TelegramConfig, PTConfig, DownloadClientConfig, str]:
     """从 os.environ 加载所有配置，缺少必填项时抛出 ValueError。"""
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -59,6 +60,7 @@ def load_config() -> tuple[TelegramConfig, PTConfig, DownloadClientConfig]:
     pt_cfg = PTConfig(
         site_url=site_url,
         passkey=passkey,
+        cookie=os.environ.get("PT_COOKIE", ""),
         max_results=int(os.environ.get("PT_MAX_RESULTS", "50")),
         page_size=int(os.environ.get("PT_PAGE_SIZE", "10")),
     )
@@ -78,4 +80,6 @@ def load_config() -> tuple[TelegramConfig, PTConfig, DownloadClientConfig]:
         tr_password=os.environ.get("TR_PASSWORD", ""),
     )
 
-    return telegram_cfg, pt_cfg, dl_cfg
+    tmdb_api_key = os.environ.get("TMDB_API_KEY", "")
+
+    return telegram_cfg, pt_cfg, dl_cfg, tmdb_api_key

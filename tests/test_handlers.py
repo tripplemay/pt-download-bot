@@ -497,15 +497,18 @@ class TestSearchCommand:
         pt_client = AsyncMock()
         pt_client.search = AsyncMock(return_value=results)
 
+        # reply_text returns a message mock with edit_text
+        msg_mock = AsyncMock()
         update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
         context = make_context(
             db=db_with_users, pt_client=pt_client, args=["test"], page_size=10
         )
         await search_command(update, context)
 
-        # reply_text called twice: searching message + results
-        assert update.message.reply_text.await_count == 2
-        result_text = update.message.reply_text.call_args_list[1][0][0]
+        # Results shown via msg.edit_text
+        msg_mock.edit_text.assert_awaited()
+        result_text = msg_mock.edit_text.call_args[0][0]
         assert "Torrent.Title.1" in result_text
         assert "1.37 GB" in result_text
 
@@ -517,28 +520,36 @@ class TestSearchCommand:
     async def test_empty_results(self, db_with_users):
         pt_client = AsyncMock()
         pt_client.search = AsyncMock(return_value=[])
+        pt_client.search_web = AsyncMock(return_value=[])
 
+        msg_mock = AsyncMock()
         update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
         context = make_context(
             db=db_with_users, pt_client=pt_client, args=["nothing"], page_size=10
         )
         await search_command(update, context)
 
-        result_text = update.message.reply_text.call_args_list[1][0][0]
+        msg_mock.edit_text.assert_awaited()
+        result_text = msg_mock.edit_text.call_args[0][0]
         assert "未找到" in result_text
 
     async def test_search_error(self, db_with_users):
         pt_client = AsyncMock()
         pt_client.search = AsyncMock(side_effect=Exception("network error"))
+        pt_client.search_web = AsyncMock(return_value=[])
 
+        msg_mock = AsyncMock()
         update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
         context = make_context(
             db=db_with_users, pt_client=pt_client, args=["fail"], page_size=10
         )
         await search_command(update, context)
 
-        result_text = update.message.reply_text.call_args_list[1][0][0]
-        assert "出错" in result_text
+        msg_mock.edit_text.assert_awaited()
+        result_text = msg_mock.edit_text.call_args[0][0]
+        assert "未找到" in result_text
 
 
 # ===========================================================================

@@ -14,6 +14,7 @@ from bot.config import load_config
 from bot.database import Database
 from bot.pt.nexusphp import NexusPHPSite
 from bot.clients import create_download_client
+from bot.tmdb import TMDBClient
 from bot.middleware import require_auth, require_owner
 from bot.handlers.search import search_command, more_command
 from bot.handlers.download import download_command
@@ -93,7 +94,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     # 1. 加载配置
-    telegram_cfg, pt_cfg, dl_cfg = load_config()
+    telegram_cfg, pt_cfg, dl_cfg, tmdb_api_key = load_config()
 
     # 2. 初始化数据库，写入 Owner
     import os
@@ -102,18 +103,25 @@ def main():
     db.init_owner(telegram_cfg.owner_id)
 
     # 3. 初始化 PT 站客户端
-    pt_client = NexusPHPSite(pt_cfg.site_url, pt_cfg.passkey)
+    pt_client = NexusPHPSite(pt_cfg.site_url, pt_cfg.passkey, cookie=pt_cfg.cookie)
 
     # 4. 初始化下载客户端
     dl_client = create_download_client(dl_cfg)
 
-    # 5. 构建 Telegram Application
+    # 5. 初始化 TMDB 客户端（可选）
+    tmdb_client = None
+    if tmdb_api_key:
+        tmdb_client = TMDBClient(tmdb_api_key)
+        logger.info("TMDB 翻译已启用")
+
+    # 6. 构建 Telegram Application
     app = ApplicationBuilder().token(telegram_cfg.bot_token).build()
 
     # 6. 将共享对象存入 bot_data
     app.bot_data["db"] = db
     app.bot_data["pt_client"] = pt_client
     app.bot_data["dl_client"] = dl_client
+    app.bot_data["tmdb_client"] = tmdb_client
     app.bot_data["owner_id"] = telegram_cfg.owner_id
     app.bot_data["page_size"] = pt_cfg.page_size
 
