@@ -1,7 +1,8 @@
-"""群晖 Download Station API 客户端"""
+"""群晖 Download Station API 客户端（兼容 DSM 6 v1 API 和 DSM 7 v2 API）"""
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List
 
@@ -13,7 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class DownloadStationClient(DownloadClientBase):
-    """群晖 Download Station 下载客户端（兼容 DSM 6/7，统一使用 entry.cgi）"""
+    """群晖 Download Station 下载客户端
+
+    自动检测 API 版本：优先使用 DownloadStation2 (DSM 7)，
+    不可用时降级到 DownloadStation (DSM 6)。
+    """
 
     def __init__(self, host: str, username: str, password: str):
         self.host = host.rstrip("/")
@@ -22,6 +27,7 @@ class DownloadStationClient(DownloadClientBase):
         self.sid: str | None = None
         self.client = httpx.AsyncClient(timeout=30.0, verify=False)
         self._api_url = f"{self.host}/webapi/entry.cgi"
+        self._use_v2: bool | None = None  # None = 未检测
 
     async def _login(self) -> None:
         """登录 Download Station，获取 SID"""
@@ -45,12 +51,33 @@ class DownloadStationClient(DownloadClientBase):
         logger.info("Download Station 登录成功")
 
     async def _ensure_login(self) -> None:
-        """确保已登录"""
         if self.sid is None:
             await self._login()
 
-    async def _request_with_retry(self, method: str, **kwargs) -> dict:
-        """发送请求，如果 SID 过期则自动重新登录重试"""
+    async def _detect_api_version(self) -> None:
+        """检测 v2 API 是否可用"""
+        if self._use_v2 is not None:
+            return
+        await self._ensure_login()
+        params = {
+            "api": "SYNO.DownloadStation2.Task",
+            "version": "2",
+            "method": "list",
+            "offset": "0",
+            "limit": "1",
+            "_sid": self.sid,
+        }
+        resp = await self.client.get(self._api_url, params=params)
+        data = resp.json()
+        if data.get("success"):
+            self._use_v2 = True
+            logger.info("Download Station 使用 v2 API (DSM 7)")
+        else:
+            self._use_v2 = False
+            logger.info("Download Station 使用 v1 API (DSM 6)")
+
+    async def _api_request(self, method: str, **kwargs) -> dict:
+        """发送 API 请求，SID 过期时自动重新登录重试"""
         await self._ensure_login()
 
         resp = await self.client.request(method, self._api_url, **kwargs)
@@ -59,9 +86,8 @@ class DownloadStationClient(DownloadClientBase):
 
         if not data.get("success"):
             error_code = data.get("error", {}).get("code")
-            logger.warning(
-                "Download Station 请求失败 (error=%s)，尝试重新登录", error_code
-            )
+            # SID 过期，重新登录重试
+            logger.warning("Download Station 请求失败 (error=%s)，重新登录", error_code)
             self.sid = None
             await self._login()
             if "params" in kwargs:
@@ -77,17 +103,34 @@ class DownloadStationClient(DownloadClientBase):
                 )
         return data
 
+    # ------------------------------------------------------------------
+    # 添加任务
+    # ------------------------------------------------------------------
+
     async def add_torrent_url(self, url: str) -> bool:
-        """通过 URL 添加种子下载任务"""
         try:
-            form_data = {
-                "api": "SYNO.DownloadStation.Task",
-                "version": "1",
-                "method": "create",
-                "uri": url,
-                "_sid": self.sid,
-            }
-            await self._request_with_retry("POST", data=form_data)
+            await self._detect_api_version()
+
+            if self._use_v2:
+                form_data = {
+                    "api": "SYNO.DownloadStation2.Task",
+                    "version": "2",
+                    "method": "create",
+                    "uri": json.dumps([url]),
+                    "type": '"url"',
+                    "create_list": "false",
+                    "_sid": self.sid,
+                }
+            else:
+                form_data = {
+                    "api": "SYNO.DownloadStation.Task",
+                    "version": "1",
+                    "method": "create",
+                    "uri": url,
+                    "_sid": self.sid,
+                }
+
+            await self._api_request("POST", data=form_data)
             logger.info("Download Station 添加 URL 任务成功")
             return True
         except Exception:
@@ -95,32 +138,39 @@ class DownloadStationClient(DownloadClientBase):
             return False
 
     async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
-        """通过上传 .torrent 文件添加下载任务"""
         try:
             await self._ensure_login()
-            form_data = {
-                "api": "SYNO.DownloadStation.Task",
-                "version": "1",
-                "method": "create",
-                "_sid": self.sid,
-            }
-            files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
+            await self._detect_api_version()
 
+            if self._use_v2:
+                form_data = {
+                    "api": "SYNO.DownloadStation2.Task",
+                    "version": "2",
+                    "method": "create",
+                    "type": '"file"',
+                    "create_list": "false",
+                    "_sid": self.sid,
+                }
+            else:
+                form_data = {
+                    "api": "SYNO.DownloadStation.Task",
+                    "version": "1",
+                    "method": "create",
+                    "_sid": self.sid,
+                }
+
+            files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
             resp = await self.client.post(self._api_url, data=form_data, files=files)
             resp.raise_for_status()
             data = resp.json()
 
             if not data.get("success"):
-                logger.warning("Download Station 上传失败，尝试重新登录")
+                logger.warning("Download Station 上传失败，重新登录重试")
                 self.sid = None
                 await self._login()
                 form_data["_sid"] = self.sid
-                files = {
-                    "file": (filename, torrent_bytes, "application/x-bittorrent")
-                }
-                resp = await self.client.post(
-                    self._api_url, data=form_data, files=files
-                )
+                files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
+                resp = await self.client.post(self._api_url, data=form_data, files=files)
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("success"):
@@ -134,24 +184,48 @@ class DownloadStationClient(DownloadClientBase):
             logger.exception("Download Station 添加文件任务失败")
             return False
 
+    # ------------------------------------------------------------------
+    # 任务列表
+    # ------------------------------------------------------------------
+
     async def get_tasks(self) -> List[dict]:
-        """获取当前下载任务列表"""
         await self._ensure_login()
-        params = {
-            "api": "SYNO.DownloadStation.Task",
-            "version": "1",
-            "method": "list",
-            "_sid": self.sid,
-        }
-        data = await self._request_with_retry("GET", params=params)
-        tasks = data.get("data", {}).get("tasks", [])
-        return [{"title": t.get("title", ""), **t} for t in tasks]
+        await self._detect_api_version()
+
+        if self._use_v2:
+            params = {
+                "api": "SYNO.DownloadStation2.Task",
+                "version": "2",
+                "method": "list",
+                "offset": "0",
+                "limit": "100",
+                "additional": '["detail"]',
+                "_sid": self.sid,
+            }
+            data = await self._api_request("GET", params=params)
+            tasks = data.get("data", {}).get("tasks", [])
+            return [{"title": t.get("title", ""), **t} for t in tasks]
+        else:
+            params = {
+                "api": "SYNO.DownloadStation.Task",
+                "version": "1",
+                "method": "list",
+                "_sid": self.sid,
+            }
+            data = await self._api_request("GET", params=params)
+            tasks = data.get("data", {}).get("tasks", [])
+            return [{"title": t.get("title", ""), **t} for t in tasks]
+
+    # ------------------------------------------------------------------
+    # 连接测试
+    # ------------------------------------------------------------------
 
     async def test_connection(self) -> bool:
-        """测试连接是否正常"""
         try:
             self.sid = None
+            self._use_v2 = None
             await self._login()
+            await self._detect_api_version()
             await self.get_tasks()
             return True
         except Exception:
@@ -159,5 +233,4 @@ class DownloadStationClient(DownloadClientBase):
             return False
 
     async def close(self):
-        """关闭连接"""
         await self.client.aclose()

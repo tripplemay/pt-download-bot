@@ -137,18 +137,16 @@ class TestDownloadStationClient:
     # -- add_torrent_url -------------------------------------------------
 
     async def test_add_torrent_url_success(self, ds_client):
-        ds_client._request_with_retry = AsyncMock(
-            return_value={"success": True}
-        )
+        ds_client._api_request = AsyncMock(return_value={"success": True})
+        ds_client._use_v2 = False
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
         assert result is True
-        ds_client._request_with_retry.assert_awaited_once()
+        ds_client._api_request.assert_awaited_once()
 
     async def test_add_torrent_url_failure(self, ds_client):
-        ds_client._request_with_retry = AsyncMock(
-            side_effect=ConnectionError("fail")
-        )
+        ds_client._api_request = AsyncMock(side_effect=ConnectionError("fail"))
+        ds_client._use_v2 = False
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
         assert result is False
@@ -157,6 +155,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_file_success(self, ds_client):
         ds_client.sid = "existing_sid"
+        ds_client._use_v2 = False
         ds_client.client.post = AsyncMock(
             return_value=_httpx_response(json_data={"success": True})
         )
@@ -165,6 +164,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_file_failure(self, ds_client):
         ds_client.sid = "existing_sid"
+        ds_client._use_v2 = False
         ds_client.client.post = AsyncMock(side_effect=Exception("network error"))
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
         assert result is False
@@ -173,7 +173,8 @@ class TestDownloadStationClient:
 
     async def test_get_tasks(self, ds_client):
         ds_client.sid = "existing_sid"
-        ds_client._request_with_retry = AsyncMock(
+        ds_client._use_v2 = False
+        ds_client._api_request = AsyncMock(
             return_value={
                 "success": True,
                 "data": {
@@ -194,10 +195,10 @@ class TestDownloadStationClient:
     async def test_test_connection_success(self, ds_client):
         ds_client.client.get = AsyncMock(
             return_value=_httpx_response(
-                json_data={"success": True, "data": {"sid": "new_sid"}}
+                json_data={"success": True, "data": {"sid": "new_sid", "tasks": []}}
             )
         )
-        ds_client._request_with_retry = AsyncMock(
+        ds_client._api_request = AsyncMock(
             return_value={
                 "success": True,
                 "data": {"tasks": []},
@@ -215,7 +216,7 @@ class TestDownloadStationClient:
 
     # -- _request_with_retry SID expiry ----------------------------------
 
-    async def test_request_with_retry_sid_expiry(self, ds_client):
+    async def test_api_request_sid_expiry(self, ds_client):
         """First request returns success=false (SID expired), re-login then retry succeeds."""
         ds_client.sid = "old_sid"
 
@@ -226,18 +227,16 @@ class TestDownloadStationClient:
             json_data={"success": True, "data": {"result": "ok"}}
         )
 
-        # request: first call expired, second call success
         ds_client.client.request = AsyncMock(
             side_effect=[expired_resp, success_resp]
         )
-        # _login re-establishes sid
         ds_client.client.get = AsyncMock(
             return_value=_httpx_response(
                 json_data={"success": True, "data": {"sid": "new_sid"}}
             )
         )
 
-        result = await ds_client._request_with_retry(
+        result = await ds_client._api_request(
             "GET", params={"_sid": "old_sid"}
         )
         assert result["success"] is True
