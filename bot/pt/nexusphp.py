@@ -363,7 +363,14 @@ class NexusPHPSite(PTSiteBase):
     # 下载种子
     # ------------------------------------------------------------------
     async def download_torrent(self, torrent_url: str) -> bytes:
-        """下载 .torrent 文件，返回原始字节"""
+        """下载 .torrent 文件，返回原始字节。校验域名防止 passkey 泄露。"""
+        from urllib.parse import urlparse
+        url_host = urlparse(torrent_url).netloc
+        base_host = urlparse(self.base_url).netloc
+        if url_host and base_host and url_host != base_host:
+            raise ValueError(
+                f"torrent URL 域名 ({url_host}) 与 PT 站 ({base_host}) 不匹配，拒绝下载"
+            )
         resp = await self._get(torrent_url)
         resp.raise_for_status()
         return resp.content

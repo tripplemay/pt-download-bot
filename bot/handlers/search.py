@@ -16,14 +16,16 @@ from bot.utils import truncate
 
 logger = logging.getLogger(__name__)
 
-# 每个用户的搜索结果与分页状态
+# 每个用户的搜索结果与分页状态（上限 100 用户）
 # {user_id: {"results": [TorrentResult, ...], "page": int, "page_size": int}}
 user_cache: dict = {}
+_USER_CACHE_MAX = 100
 
-# 搜索结果短期缓存，避免重复请求 PT 站
+# 搜索结果短期缓存，避免重复请求 PT 站（上限 200 条）
 # {keyword_normalized: {"results": [...], "expires": timestamp}}
 _search_result_cache: dict = {}
 _CACHE_TTL = 300  # 5 分钟
+_SEARCH_CACHE_MAX = 200
 
 
 def _contains_chinese(text: str) -> bool:
@@ -174,6 +176,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyword = " ".join(context.args)
+    if len(keyword) > 100:
+        await update.message.reply_text("搜索关键词过长，请控制在 100 字符以内。")
+        return
     cache_key = keyword.lower().strip()
 
     # 检查搜索结果缓存（5 分钟内相同关键词不重复请求 PT 站）
@@ -254,7 +259,10 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             logger.exception("RSS 搜索失败")
 
-    # 缓存搜索结果（无论是否为空）
+    # 缓存搜索结果（无论是否为空），超出上限时淘汰最旧条目
+    if len(_search_result_cache) >= _SEARCH_CACHE_MAX:
+        oldest = min(_search_result_cache, key=lambda k: _search_result_cache[k]["expires"])
+        del _search_result_cache[oldest]
     _search_result_cache[cache_key] = {
         "results": results,
         "expires": time.time() + _CACHE_TTL,
@@ -308,9 +316,26 @@ async def page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, uid_str, page_str = query.data.split(":")
-    user_id = int(uid_str)
-    page = int(page_str)
+    # C3: 认证检查
+    db = context.bot_data["db"]
+    if not db.is_authorized(query.from_user.id):
+        await query.answer("无权限执行此操作。", show_alert=True)
+        return
+
+    # M3: 格式和边界验证
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("无效请求。", show_alert=True)
+        return
+    _, uid_str, page_str = parts
+    try:
+        user_id = int(uid_str)
+        page = int(page_str)
+        if page < 0:
+            raise ValueError
+    except ValueError:
+        await query.answer("无效请求。", show_alert=True)
+        return
 
     # 仅允许本人操作
     if query.from_user.id != user_id:
@@ -336,9 +361,26 @@ async def dl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, uid_str, index_str = query.data.split(":")
-    user_id = int(uid_str)
-    index = int(index_str)
+    # C3: 认证检查
+    db = context.bot_data["db"]
+    if not db.is_authorized(query.from_user.id):
+        await query.answer("无权限执行此操作。", show_alert=True)
+        return
+
+    # M3: 格式和边界验证
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("无效请求。", show_alert=True)
+        return
+    _, uid_str, index_str = parts
+    try:
+        user_id = int(uid_str)
+        index = int(index_str)
+        if index < 1:
+            raise ValueError
+    except ValueError:
+        await query.answer("无效请求。", show_alert=True)
+        return
 
     if query.from_user.id != user_id:
         await query.answer("这不是你的搜索结果。", show_alert=True)

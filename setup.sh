@@ -24,11 +24,21 @@ while [ -z "$bot_token" ]; do
     read -p "Telegram Bot Token: " bot_token
 done
 
+if ! echo "$bot_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+    echo "❌ Token 格式无效，请检查后重试"
+    exit 1
+fi
+
 read -p "你的 Telegram User ID（从 @userinfobot 获取）: " owner_id
 while [ -z "$owner_id" ]; do
     echo "  ❌ User ID 不能为空"
     read -p "Telegram User ID: " owner_id
 done
+
+if ! echo "$owner_id" | grep -qE '^[0-9]+$'; then
+    echo "❌ User ID 必须是数字"
+    exit 1
+fi
 
 echo ""
 echo "✅ Telegram 配置完成"
@@ -86,15 +96,9 @@ esac
 echo ""
 read -p "TMDB API Key（提升中文搜索，回车跳过）: " tmdb_key
 
-# --- 写入 .env ---
-cat > .env << EOF
-# === 必需配置 ===
-TELEGRAM_BOT_TOKEN=${bot_token}
-OWNER_TELEGRAM_ID=${owner_id}
-
-# === 数据库 ===
-DB_PATH=/app/data/bot.db
-EOF
+# --- 安全写入 .env（使用 printf 避免 Shell 注入）---
+printf '# === 必需配置 ===\nTELEGRAM_BOT_TOKEN=%s\nOWNER_TELEGRAM_ID=%s\n\n# === 数据库 ===\nDB_PATH=/app/data/bot.db\n' \
+    "$bot_token" "$owner_id" > .env
 
 # 仅在用户填了值时写入可选配置
 [ -n "$pt_url" ]    && echo "PT_SITE_URL=${pt_url}" >> .env
@@ -121,6 +125,8 @@ if [ -n "$dl_client" ]; then
             ;;
     esac
 fi
+
+chmod 600 .env
 
 echo ""
 echo "========================================="

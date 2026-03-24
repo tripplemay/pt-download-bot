@@ -26,7 +26,9 @@ class TransmissionClient(DownloadClientBase):
         if username and password:
             auth = httpx.BasicAuth(username, password)
 
-        self.client = httpx.AsyncClient(timeout=30.0, auth=auth, verify=False)
+        self.client = httpx.AsyncClient(
+            timeout=30.0, auth=auth, verify=host.startswith("https://"),
+        )
 
     async def _rpc_request(self, method: str, arguments: Optional[dict] = None) -> dict:
         """发送 Transmission RPC 请求，自动处理 409 获取 session id"""

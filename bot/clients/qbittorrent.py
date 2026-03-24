@@ -18,7 +18,9 @@ class QBittorrentClient(DownloadClientBase):
         self.username = username
         self.password = password
         self.logged_in = False
-        self.client = httpx.AsyncClient(timeout=30.0, verify=False)
+        self.client = httpx.AsyncClient(
+            timeout=30.0, verify=host.startswith("https://"),
+        )
 
     async def _login(self) -> None:
         """登录 qBittorrent，获取 cookie SID"""

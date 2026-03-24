@@ -24,7 +24,14 @@ class Database:
             os.makedirs(parent, exist_ok=True)
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self._init_tables()
+        # 收紧数据库文件权限（仅所有者可读写）
+        try:
+            os.chmod(db_path, 0o600)
+        except OSError:
+            pass
 
     def _init_tables(self):
         cur = self.conn.cursor()

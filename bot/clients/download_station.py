@@ -49,7 +49,9 @@ class DownloadStationClient(DownloadClientBase):
         self.username = username
         self.password = password
         self.sid: str | None = None
-        self.client = httpx.AsyncClient(timeout=30.0, verify=False)
+        self.client = httpx.AsyncClient(
+            timeout=30.0, verify=host.startswith("https://"),
+        )
         self._api_url = f"{self.host}/webapi/entry.cgi"
         self._profile: Optional[_APIProfile] = None  # None = 未检测
 

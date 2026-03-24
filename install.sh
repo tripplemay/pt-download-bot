@@ -105,18 +105,28 @@ while [ -z "$bot_token" ]; do
     ask "Telegram Bot Token: " bot_token
 done
 
+# 校验 Token 格式（数字:字母数字下划线横线）
+if ! echo "$bot_token" | grep -qE '^[0-9]+:[A-Za-z0-9_-]+$'; then
+    error "Token 格式无效，请检查后重试"
+    exit 1
+fi
+
 ask "你的 Telegram User ID（从 @userinfobot 获取）: " owner_id
 while [ -z "$owner_id" ]; do
     echo "  ❌ User ID 不能为空"
     ask "Telegram User ID: " owner_id
 done
 
-# 7. 写入 .env
-cat > .env << EOF
-TELEGRAM_BOT_TOKEN=${bot_token}
-OWNER_TELEGRAM_ID=${owner_id}
-DB_PATH=/app/data/bot.db
-EOF
+# 校验 User ID 格式（纯数字）
+if ! echo "$owner_id" | grep -qE '^[0-9]+$'; then
+    error "User ID 必须是数字"
+    exit 1
+fi
+
+# 7. 安全写入 .env（使用 printf 避免 Shell 注入）
+printf 'TELEGRAM_BOT_TOKEN=%s\nOWNER_TELEGRAM_ID=%s\nDB_PATH=/app/data/bot.db\n' \
+    "$bot_token" "$owner_id" > .env
+chmod 600 .env
 
 info ".env 已生成"
 
