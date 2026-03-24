@@ -1,10 +1,15 @@
-"""群晖 Download Station API 客户端（兼容 DSM 6 v1 API 和 DSM 7 v2 API）"""
+"""群晖 Download Station API 客户端（兼容 DSM 6 v1 API 和 DSM 7 v2 API）
+
+启动时通过 API 自检发现实际可用的端点、字段名和参数要求，
+而非硬编码假设。所有发现结果缓存在实例属性中。
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import httpx
 
@@ -13,11 +18,30 @@ from bot.clients.base import DownloadClientBase
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _APIProfile:
+    """API 自检发现的接口配置"""
+    version: int = 0                     # 2 = DSM 7, 1 = DSM 6
+    # 任务列表
+    list_api: str = ""                   # e.g. "SYNO.DownloadStation2.Task"
+    list_version: str = "2"
+    list_task_key: str = "task"          # 响应中任务列表的 key
+    # 创建任务
+    create_api: str = ""
+    create_version: str = "2"
+    create_url_field: str = "url"        # v2="url", v1="uri"
+    destination: str = ""                # v2 必需的下载目录
+    destination_required: bool = False
+
+
 class DownloadStationClient(DownloadClientBase):
     """群晖 Download Station 下载客户端
 
-    自动检测 API 版本：优先使用 DownloadStation2 (DSM 7)，
-    不可用时降级到 DownloadStation (DSM 6)。
+    首次使用时执行 API 自检（_run_api_probe），自动发现：
+    - v1 还是 v2 可用
+    - list 接口的响应字段名（task vs tasks）
+    - create 接口的 URL 字段名（url vs uri）
+    - destination 是否必需及其默认值
     """
 
     def __init__(self, host: str, username: str, password: str):
@@ -27,11 +51,13 @@ class DownloadStationClient(DownloadClientBase):
         self.sid: str | None = None
         self.client = httpx.AsyncClient(timeout=30.0, verify=False)
         self._api_url = f"{self.host}/webapi/entry.cgi"
-        self._use_v2: bool | None = None  # None = 未检测
-        self._destination: str = ""
+        self._profile: Optional[_APIProfile] = None  # None = 未检测
+
+    # ------------------------------------------------------------------
+    # 登录
+    # ------------------------------------------------------------------
 
     async def _login(self) -> None:
-        """登录 Download Station，获取 SID"""
         params = {
             "api": "SYNO.API.Auth",
             "version": "6",
@@ -55,71 +81,151 @@ class DownloadStationClient(DownloadClientBase):
         if self.sid is None:
             await self._login()
 
-    async def _detect_api_version(self) -> None:
-        """检测 v2 API 是否可用，并获取默认下载目录"""
-        if self._use_v2 is not None:
+    # ------------------------------------------------------------------
+    # API 自检（首次调用时执行一次）
+    # ------------------------------------------------------------------
+
+    async def _ensure_profile(self) -> None:
+        if self._profile is not None:
             return
         await self._ensure_login()
-        params = {
-            "api": "SYNO.DownloadStation2.Task",
-            "version": "2",
-            "method": "list",
-            "offset": "0",
-            "limit": "1",
-            "_sid": self.sid,
-        }
-        resp = await self.client.get(self._api_url, params=params)
-        data = resp.json()
-        if data.get("success"):
-            self._use_v2 = True
-            logger.info("Download Station 使用 v2 API (DSM 7)")
-            await self._fetch_default_destination()
-        else:
-            self._use_v2 = False
-            self._destination = ""
-            logger.info("Download Station 使用 v1 API (DSM 6)")
+        self._profile = await self._run_api_probe()
 
-    async def _fetch_default_destination(self) -> None:
-        """查询 Download Station 默认下载目录"""
-        params = {
-            "api": "SYNO.DownloadStation2.Settings.Location",
-            "version": "1",
-            "method": "get",
-            "_sid": self.sid,
-        }
+    async def _run_api_probe(self) -> _APIProfile:
+        """探测 DS API 实际行为，返回可用配置。"""
+        profile = _APIProfile()
+
+        # --- 1. 尝试 v2 list ---
+        v2_list = await self._probe_request({
+            "api": "SYNO.DownloadStation2.Task",
+            "version": "2", "method": "list",
+            "offset": "0", "limit": "1", "_sid": self.sid,
+        })
+        if v2_list is not None:
+            profile.version = 2
+            profile.list_api = "SYNO.DownloadStation2.Task"
+            profile.list_version = "2"
+            profile.create_api = "SYNO.DownloadStation2.Task"
+            profile.create_version = "2"
+
+            # 发现任务列表 key：尝试 "task"（单数）和 "tasks"（复数）
+            v2_data = v2_list.get("data", {})
+            if "task" in v2_data:
+                profile.list_task_key = "task"
+            elif "tasks" in v2_data:
+                profile.list_task_key = "tasks"
+            else:
+                profile.list_task_key = "task"
+            logger.info("自检: v2 list 可用, 任务key='%s'", profile.list_task_key)
+
+            # 发现 create 的 URL 字段名：尝试用 "url"，失败则用 "uri"
+            profile.create_url_field = await self._probe_create_field()
+
+            # 获取默认下载目录
+            profile.destination = await self._probe_destination()
+            profile.destination_required = True
+
+            logger.info(
+                "自检完成: v2, url_field='%s', destination='%s'",
+                profile.create_url_field, profile.destination,
+            )
+            return profile
+
+        # --- 2. 降级到 v1 ---
+        v1_list = await self._probe_request({
+            "api": "SYNO.DownloadStation.Task",
+            "version": "1", "method": "list", "_sid": self.sid,
+        })
+        if v1_list is not None:
+            profile.version = 1
+            profile.list_api = "SYNO.DownloadStation.Task"
+            profile.list_version = "1"
+            profile.create_api = "SYNO.DownloadStation.Task"
+            profile.create_version = "1"
+            profile.list_task_key = "tasks"
+            profile.create_url_field = "uri"
+            profile.destination_required = False
+            logger.info("自检完成: v1 API")
+            return profile
+
+        # --- 3. 都不行，用 v2 默认值（create 可能仍可用）---
+        logger.warning("自检: list 接口均不可用，使用 v2 默认配置")
+        profile.version = 2
+        profile.list_api = "SYNO.DownloadStation2.Task"
+        profile.list_version = "2"
+        profile.create_api = "SYNO.DownloadStation2.Task"
+        profile.create_version = "2"
+        profile.create_url_field = "url"
+        profile.destination = await self._probe_destination()
+        profile.destination_required = True
+        return profile
+
+    async def _probe_request(self, params: dict) -> Optional[dict]:
+        """发送探测请求，成功返回 JSON dict，失败返回 None。"""
         try:
             resp = await self.client.get(self._api_url, params=params)
             data = resp.json()
             if data.get("success"):
-                self._destination = data["data"].get("default_destination", "")
-                logger.info("Download Station 默认下载目录: %s", self._destination)
-                return
-        except Exception:
-            logger.warning("获取默认下载目录失败，尝试备用方式")
+                return data
+            logger.debug("探测失败: %s → %s", params.get("api"), data)
+        except Exception as e:
+            logger.debug("探测异常: %s → %s", params.get("api"), e)
+        return None
 
-        # 备用：从全局设置获取
-        params2 = {
-            "api": "SYNO.DownloadStation2.Settings.Global",
-            "version": "1",
-            "method": "get",
-            "_sid": self.sid,
-        }
-        try:
-            resp = await self.client.get(self._api_url, params=params2)
-            data = resp.json()
-            if data.get("success"):
-                self._destination = data["data"].get("default_destination", "")
-                logger.info("Download Station 下载目录(Global): %s", self._destination)
-                return
-        except Exception:
-            pass
+    async def _probe_create_field(self) -> str:
+        """探测 v2 create 的 URL 参数名是 'url' 还是 'uri'。
 
-        # 最后兜底
-        self._destination = ""
-        logger.warning("无法获取默认下载目录，将使用空值")
+        用一个无效 URL 测试，只看是哪个字段名不报 'condition' 错误。
+        """
+        dummy = "https://0.0.0.0/probe.torrent"
+        dest = await self._probe_destination()
+
+        for field_name in ("url", "uri"):
+            form_data = {
+                "api": "SYNO.DownloadStation2.Task",
+                "version": "2", "method": "create",
+                field_name: json.dumps([dummy]),
+                "destination": dest,
+                "type": "url", "create_list": "false",
+                "_sid": self.sid,
+            }
+            try:
+                resp = await self.client.post(self._api_url, data=form_data)
+                data = resp.json()
+                errors = data.get("error", {}).get("errors", {})
+                # 如果错误不是关于这个字段名的 condition，说明字段名被接受了
+                if data.get("success") or errors.get("name") != field_name:
+                    logger.info("自检: create url_field='%s' 可用", field_name)
+                    return field_name
+            except Exception:
+                pass
+
+        return "url"  # 默认
+
+    async def _probe_destination(self) -> str:
+        """查询默认下载目录。"""
+        for api in (
+            "SYNO.DownloadStation2.Settings.Location",
+            "SYNO.DownloadStation2.Settings.Global",
+        ):
+            result = await self._probe_request({
+                "api": api, "version": "1",
+                "method": "get", "_sid": self.sid,
+            })
+            if result:
+                dest = result.get("data", {}).get("default_destination", "")
+                if dest:
+                    logger.info("自检: 默认下载目录='%s' (via %s)", dest, api)
+                    return dest
+
+        logger.warning("自检: 无法获取默认下载目录")
+        return ""
+
+    # ------------------------------------------------------------------
+    # 通用请求（带 SID 过期重试）
+    # ------------------------------------------------------------------
 
     async def _api_request(self, method: str, **kwargs) -> dict:
-        """发送 API 请求，SID 过期时自动重新登录重试"""
         await self._ensure_login()
 
         resp = await self.client.request(method, self._api_url, **kwargs)
@@ -128,8 +234,7 @@ class DownloadStationClient(DownloadClientBase):
 
         if not data.get("success"):
             error_code = data.get("error", {}).get("code")
-            # SID 过期，重新登录重试
-            logger.warning("Download Station 请求失败 (error=%s)，重新登录", error_code)
+            logger.warning("DS 请求失败 (error=%s)，重新登录", error_code)
             self.sid = None
             await self._login()
             if "params" in kwargs:
@@ -141,7 +246,7 @@ class DownloadStationClient(DownloadClientBase):
             data = resp.json()
             if not data.get("success"):
                 raise ConnectionError(
-                    f"Download Station 请求失败: {data.get('error', {})}"
+                    f"DS 请求失败: {data.get('error', {})}"
                 )
         return data
 
@@ -151,57 +256,51 @@ class DownloadStationClient(DownloadClientBase):
 
     async def add_torrent_url(self, url: str) -> bool:
         try:
-            await self._detect_api_version()
+            await self._ensure_profile()
+            p = self._profile
 
-            if self._use_v2:
-                form_data = {
-                    "api": "SYNO.DownloadStation2.Task",
-                    "version": "2",
-                    "method": "create",
-                    "url": json.dumps([url]),
-                    "destination": self._destination,
-                    "type": "url",
-                    "create_list": "false",
-                    "_sid": self.sid,
-                }
+            form_data = {
+                "api": p.create_api,
+                "version": p.create_version,
+                "method": "create",
+                "_sid": self.sid,
+            }
+
+            if p.version == 2:
+                form_data[p.create_url_field] = json.dumps([url])
+                form_data["type"] = "url"
+                form_data["create_list"] = "false"
+                if p.destination_required and p.destination:
+                    form_data["destination"] = p.destination
             else:
-                form_data = {
-                    "api": "SYNO.DownloadStation.Task",
-                    "version": "1",
-                    "method": "create",
-                    "uri": url,
-                    "_sid": self.sid,
-                }
+                form_data["uri"] = url
 
             await self._api_request("POST", data=form_data)
-            logger.info("Download Station 添加 URL 任务成功")
+            logger.info("DS 添加 URL 任务成功")
             return True
         except Exception:
-            logger.exception("Download Station 添加 URL 任务失败")
+            logger.exception("DS 添加 URL 任务失败")
             return False
 
     async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
         try:
             await self._ensure_login()
-            await self._detect_api_version()
+            await self._ensure_profile()
+            p = self._profile
 
-            if self._use_v2:
-                form_data = {
-                    "api": "SYNO.DownloadStation2.Task",
-                    "version": "2",
-                    "method": "create",
-                    "destination": self._destination,
-                    "type": "file",
-                    "create_list": "false",
-                    "_sid": self.sid,
-                }
-            else:
-                form_data = {
-                    "api": "SYNO.DownloadStation.Task",
-                    "version": "1",
-                    "method": "create",
-                    "_sid": self.sid,
-                }
+            form_data = {
+                "api": p.create_api,
+                "version": p.create_version,
+                "method": "create",
+                "_sid": self.sid,
+            }
+
+            if p.version == 2:
+                form_data["type"] = "file"
+                form_data["create_list"] = "false"
+                if p.destination_required and p.destination:
+                    form_data["destination"] = p.destination
+            # v1 不需要额外字段
 
             files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
             resp = await self.client.post(self._api_url, data=form_data, files=files)
@@ -209,7 +308,7 @@ class DownloadStationClient(DownloadClientBase):
             data = resp.json()
 
             if not data.get("success"):
-                logger.warning("Download Station 上传失败，重新登录重试")
+                logger.warning("DS 上传失败，重新登录重试")
                 self.sid = None
                 await self._login()
                 form_data["_sid"] = self.sid
@@ -218,14 +317,12 @@ class DownloadStationClient(DownloadClientBase):
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("success"):
-                    raise ConnectionError(
-                        f"Download Station 上传失败: {data.get('error', {})}"
-                    )
+                    raise ConnectionError(f"DS 上传失败: {data.get('error', {})}")
 
-            logger.info("Download Station 添加文件任务成功: %s", filename)
+            logger.info("DS 添加文件任务成功: %s", filename)
             return True
         except Exception:
-            logger.exception("Download Station 添加文件任务失败")
+            logger.exception("DS 添加文件任务失败")
             return False
 
     # ------------------------------------------------------------------
@@ -234,32 +331,23 @@ class DownloadStationClient(DownloadClientBase):
 
     async def get_tasks(self) -> List[dict]:
         await self._ensure_login()
-        await self._detect_api_version()
+        await self._ensure_profile()
+        p = self._profile
 
-        if self._use_v2:
-            params = {
-                "api": "SYNO.DownloadStation2.Task",
-                "version": "2",
-                "method": "list",
-                "offset": "0",
-                "limit": "100",
-                "additional": '["detail"]',
-                "_sid": self.sid,
-            }
-            data = await self._api_request("GET", params=params)
-            # v2 API 返回 "task"（单数）
-            tasks = data.get("data", {}).get("task", [])
-            return [{"title": t.get("title", ""), **t} for t in tasks]
-        else:
-            params = {
-                "api": "SYNO.DownloadStation.Task",
-                "version": "1",
-                "method": "list",
-                "_sid": self.sid,
-            }
-            data = await self._api_request("GET", params=params)
-            tasks = data.get("data", {}).get("tasks", [])
-            return [{"title": t.get("title", ""), **t} for t in tasks]
+        params = {
+            "api": p.list_api,
+            "version": p.list_version,
+            "method": "list",
+            "_sid": self.sid,
+        }
+        if p.version == 2:
+            params["offset"] = "0"
+            params["limit"] = "100"
+            params["additional"] = '["detail"]'
+
+        data = await self._api_request("GET", params=params)
+        tasks = data.get("data", {}).get(p.list_task_key, [])
+        return [{"title": t.get("title", ""), **t} for t in tasks]
 
     # ------------------------------------------------------------------
     # 连接测试
@@ -268,13 +356,13 @@ class DownloadStationClient(DownloadClientBase):
     async def test_connection(self) -> bool:
         try:
             self.sid = None
-            self._use_v2 = None
+            self._profile = None
             await self._login()
-            await self._detect_api_version()
+            await self._ensure_profile()
             await self.get_tasks()
             return True
         except Exception:
-            logger.exception("Download Station 连接测试失败")
+            logger.exception("DS 连接测试失败")
             return False
 
     async def close(self):

@@ -102,6 +102,17 @@ class TestCreateDownloadClient:
 # DownloadStationClient tests
 # ===================================================================
 
+def _v1_profile():
+    """Create a v1 API profile for testing."""
+    from bot.clients.download_station import _APIProfile
+    return _APIProfile(
+        version=1, list_api="SYNO.DownloadStation.Task", list_version="1",
+        list_task_key="tasks", create_api="SYNO.DownloadStation.Task",
+        create_version="1", create_url_field="uri",
+        destination="", destination_required=False,
+    )
+
+
 class TestDownloadStationClient:
     @pytest.fixture
     def ds_client(self):
@@ -138,7 +149,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_url_success(self, ds_client):
         ds_client._api_request = AsyncMock(return_value={"success": True})
-        ds_client._use_v2 = False
+        ds_client._profile = _v1_profile()
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
         assert result is True
@@ -146,7 +157,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_url_failure(self, ds_client):
         ds_client._api_request = AsyncMock(side_effect=ConnectionError("fail"))
-        ds_client._use_v2 = False
+        ds_client._profile = _v1_profile()
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
         assert result is False
@@ -155,7 +166,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_file_success(self, ds_client):
         ds_client.sid = "existing_sid"
-        ds_client._use_v2 = False
+        ds_client._profile = _v1_profile()
         ds_client.client.post = AsyncMock(
             return_value=_httpx_response(json_data={"success": True})
         )
@@ -164,7 +175,7 @@ class TestDownloadStationClient:
 
     async def test_add_torrent_file_failure(self, ds_client):
         ds_client.sid = "existing_sid"
-        ds_client._use_v2 = False
+        ds_client._profile = _v1_profile()
         ds_client.client.post = AsyncMock(side_effect=Exception("network error"))
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
         assert result is False
@@ -173,7 +184,7 @@ class TestDownloadStationClient:
 
     async def test_get_tasks(self, ds_client):
         ds_client.sid = "existing_sid"
-        ds_client._use_v2 = False
+        ds_client._profile = _v1_profile()
         ds_client._api_request = AsyncMock(
             return_value={
                 "success": True,
@@ -198,6 +209,7 @@ class TestDownloadStationClient:
                 json_data={"success": True, "data": {"sid": "new_sid", "tasks": []}}
             )
         )
+        ds_client._run_api_probe = AsyncMock(return_value=_v1_profile())
         ds_client._api_request = AsyncMock(
             return_value={
                 "success": True,
