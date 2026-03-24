@@ -247,7 +247,8 @@ class DownloadStationClient(DownloadClientBase):
                 "_sid": self.sid,
             }
             data = await self._api_request("GET", params=params)
-            tasks = data.get("data", {}).get("tasks", [])
+            # v2 API 返回 "task"（单数）
+            tasks = data.get("data", {}).get("task", [])
             return [{"title": t.get("title", ""), **t} for t in tasks]
         else:
             params = {
