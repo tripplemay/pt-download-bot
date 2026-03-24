@@ -360,6 +360,41 @@ class DownloadStationClient(DownloadClientBase):
         return [{"title": t.get("title", ""), **t} for t in tasks]
 
     # ------------------------------------------------------------------
+    # 删除任务
+    # ------------------------------------------------------------------
+
+    async def delete_task(self, task_id: str) -> bool:
+        try:
+            await self._ensure_login()
+            await self._ensure_profile()
+            p = self._profile
+
+            if p.version == 2:
+                form_data = {
+                    "api": "SYNO.DownloadStation2.Task",
+                    "version": "2",
+                    "method": "delete",
+                    "id": json.dumps([task_id]),
+                    "force_complete": "false",
+                    "_sid": self.sid,
+                }
+            else:
+                form_data = {
+                    "api": "SYNO.DownloadStation.Task",
+                    "version": "1",
+                    "method": "delete",
+                    "id": task_id,
+                    "_sid": self.sid,
+                }
+
+            await self._api_request("POST", data=form_data)
+            logger.info("DS 删除任务成功: %s", task_id)
+            return True
+        except Exception:
+            logger.exception("DS 删除任务失败: %s", task_id)
+            return False
+
+    # ------------------------------------------------------------------
     # 连接测试
     # ------------------------------------------------------------------
 

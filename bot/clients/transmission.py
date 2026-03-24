@@ -101,6 +101,19 @@ class TransmissionClient(DownloadClientBase):
         torrents = data.get("arguments", {}).get("torrents", [])
         return [{"name": t.get("name", ""), **t} for t in torrents]
 
+    async def delete_task(self, task_id: str) -> bool:
+        """删除任务（仅移除，不删文件）。task_id 为 torrent ID。"""
+        try:
+            await self._rpc_request(
+                "torrent-remove",
+                {"ids": [int(task_id)], "delete-local-data": False},
+            )
+            logger.info("Transmission 删除任务成功: %s", task_id)
+            return True
+        except Exception:
+            logger.exception("Transmission 删除任务失败: %s", task_id)
+            return False
+
     async def test_connection(self) -> bool:
         """测试连接是否正常"""
         try:

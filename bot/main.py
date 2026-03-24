@@ -25,7 +25,10 @@ from bot.middleware import require_auth, require_owner
 from bot.handlers.search import search_command, more_command, page_callback, dl_callback
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
-from bot.handlers.status import status_command
+from bot.handlers.status import (
+    status_command, cancel_command,
+    delete_confirm_callback, delete_execute_callback, delete_cancel_callback,
+)
 from bot.handlers.admin import (
     users_command, pending_command, ban_command, unban_command,
     setcookie_command, cookiestatus_command,
@@ -277,9 +280,13 @@ def main():
     app.add_handler(CommandHandler("setqb", setqb_command))
     app.add_handler(CommandHandler("settr", settr_command))
     app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
     app.add_handler(CallbackQueryHandler(dl_callback, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern=r"^page:"))
+    app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^cdel:"))
+    app.add_handler(CallbackQueryHandler(delete_execute_callback, pattern=r"^delok:"))
+    app.add_handler(CallbackQueryHandler(delete_cancel_callback, pattern=r"^delno:"))
 
     # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）
     app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)

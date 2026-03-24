@@ -1,11 +1,11 @@
-"""下载状态查看 — /status 命令"""
+"""下载状态查看 — /status, /cancel 命令 + 删除确认回调"""
 
 from __future__ import annotations
 
 import logging
 from typing import List
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
@@ -107,6 +107,24 @@ def _group_tasks(tasks: List[dict]) -> tuple:
     return downloading, paused, seeding
 
 
+def _build_delete_buttons(visible_tasks: List[dict], user_id: int) -> InlineKeyboardMarkup:
+    """为可见任务构建删除按钮，每行一个 ❌ 按钮。"""
+    rows = []
+    for i, task in enumerate(visible_tasks, 1):
+        task_id = task.get("id", "")
+        if task_id:
+            name = task.get("title") or task.get("name") or "未知"
+            if len(name) > 25:
+                name = name[:24] + "\u2026"
+            rows.append([
+                InlineKeyboardButton(
+                    f"❌ {i}. {name}",
+                    callback_data=f"cdel:{user_id}:{task_id}",
+                )
+            ])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 @require_auth
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看下载任务状态。普通用户只看自己的，Owner 看全部（/status mine 看自己的）。"""
@@ -120,7 +138,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = context.bot_data["db"]
     user_id = update.effective_user.id
     is_owner = db.is_owner(user_id)
-    # Owner 默认看全部，/status mine 看自己的；普通用户始终只看自己的
     show_mine = not is_owner or (context.args and context.args[0].lower() == "mine")
 
     try:
@@ -134,7 +151,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("当前没有下载任务。")
         return
 
-    # 用户过滤：通过 task_id 匹配
+    # 用户过滤
     if show_mine:
         user_task_ids = set(db.get_user_task_ids(user_id))
         if not user_task_ids:
@@ -149,32 +166,213 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     downloading, paused, seeding = _group_tasks(tasks)
 
     lines = []
+    # 收集所有可见任务（用于删除按钮）
+    visible_tasks = []
 
-    # 下载中
     if downloading:
         lines.append(f"📥 下载中 ({len(downloading)} 个):\n")
         for i, task in enumerate(downloading[:20], 1):
             lines.append(_format_task_detail(task, i))
+            visible_tasks.append(task)
         if len(downloading) > 20:
             lines.append(f"... 还有 {len(downloading) - 20} 个未显示")
 
-    # 暂停
     if paused:
         if lines:
             lines.append("")
         lines.append(f"⏸ 暂停 ({len(paused)} 个):\n")
-        offset = len(downloading)
+        offset = len(visible_tasks)
         for i, task in enumerate(paused[:10], offset + 1):
             lines.append(_format_task_detail(task, i))
+            visible_tasks.append(task)
 
-    # 做种
     if seeding:
         if lines:
             lines.append("")
         lines.append(f"🌱 做种 {len(seeding)} 个")
+        offset = len(visible_tasks)
+        for i, task in enumerate(seeding[:10], offset + 1):
+            visible_tasks.append(task)
 
     if not lines:
         await update.message.reply_text("当前没有下载任务。")
         return
 
-    await update.message.reply_text("\n".join(lines))
+    # 构建删除按钮
+    keyboard = _build_delete_buttons(visible_tasks, user_id)
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+
+
+@require_auth
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /cancel <序号> — 删除指定序号的下载任务（需二次确认）。"""
+    if not context.args:
+        await update.message.reply_text("用法: /cancel <序号>（序号来自 /status）")
+        return
+
+    try:
+        index = int(context.args[0])
+        if index < 1:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("请输入有效的数字序号。")
+        return
+
+    dl_client = context.bot_data.get("dl_client")
+    if not dl_client:
+        await update.message.reply_text("下载客户端尚未配置。")
+        return
+
+    db = context.bot_data["db"]
+    user_id = update.effective_user.id
+    is_owner = db.is_owner(user_id)
+
+    try:
+        tasks = await dl_client.get_tasks()
+    except Exception:
+        await update.message.reply_text("获取任务列表失败。")
+        return
+
+    # 用户过滤（和 /status 逻辑一致）
+    show_mine = not is_owner or (context.args and len(context.args) > 1 and context.args[1].lower() == "mine")
+    if not is_owner:
+        user_task_ids = set(db.get_user_task_ids(user_id))
+        tasks = [t for t in tasks if t.get("id") in user_task_ids]
+
+    # 构建可见列表（和 /status 排序一致）
+    downloading, paused, seeding = _group_tasks(tasks)
+    visible = list(downloading[:20]) + list(paused[:10]) + list(seeding[:10])
+
+    if index > len(visible):
+        await update.message.reply_text(
+            f"序号超出范围，请输入 1 ~ {len(visible)} 之间的数字。"
+        )
+        return
+
+    task = visible[index - 1]
+    task_id = task.get("id", "")
+    if not task_id:
+        await update.message.reply_text("该任务无法删除（缺少任务 ID）。")
+        return
+
+    name = task.get("title") or task.get("name") or "未知"
+    if len(name) > 50:
+        name = name[:49] + "\u2026"
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("确认移除", callback_data=f"delok:{user_id}:{task_id}"),
+            InlineKeyboardButton("取消", callback_data=f"delno:{user_id}"),
+        ]
+    ])
+    await update.message.reply_text(
+        f"确认移除任务？\n\n{name}",
+        reply_markup=keyboard,
+    )
+
+
+async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理删除前的二次确认弹窗：cdel:用户ID:task_id"""
+    query = update.callback_query
+    await query.answer()
+
+    db = context.bot_data["db"]
+    if not db.is_authorized(query.from_user.id):
+        await query.answer("无权限执行此操作。", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("无效请求。", show_alert=True)
+        return
+
+    _, uid_str, task_id = parts
+    try:
+        user_id = int(uid_str)
+    except ValueError:
+        await query.answer("无效请求。", show_alert=True)
+        return
+
+    if query.from_user.id != user_id:
+        await query.answer("这不是你的任务。", show_alert=True)
+        return
+
+    # 查找任务名称用于显示
+    dl_client = context.bot_data.get("dl_client")
+    name = task_id
+    if dl_client:
+        try:
+            tasks = await dl_client.get_tasks()
+            for t in tasks:
+                if t.get("id") == task_id:
+                    name = t.get("title") or t.get("name") or task_id
+                    if len(name) > 50:
+                        name = name[:49] + "\u2026"
+                    break
+        except Exception:
+            pass
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("确认移除", callback_data=f"delok:{user_id}:{task_id}"),
+            InlineKeyboardButton("取消", callback_data=f"delno:{user_id}"),
+        ]
+    ])
+    await query.edit_message_text(
+        f"确认移除任务？\n\n{name}",
+        reply_markup=keyboard,
+    )
+
+
+async def delete_execute_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理确认删除：delok:用户ID:task_id"""
+    query = update.callback_query
+    await query.answer()
+
+    db = context.bot_data["db"]
+    if not db.is_authorized(query.from_user.id):
+        await query.answer("无权限执行此操作。", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("无效请求。", show_alert=True)
+        return
+
+    _, uid_str, task_id = parts
+    try:
+        user_id = int(uid_str)
+    except ValueError:
+        await query.answer("无效请求。", show_alert=True)
+        return
+
+    # 权限校验：本人或 Owner
+    is_owner = db.is_owner(query.from_user.id)
+    if query.from_user.id != user_id and not is_owner:
+        await query.answer("无权限删除此任务。", show_alert=True)
+        return
+
+    # 非 Owner 需校验任务归属
+    if not is_owner:
+        user_task_ids = set(db.get_user_task_ids(query.from_user.id))
+        if task_id not in user_task_ids:
+            await query.answer("无权限删除此任务。", show_alert=True)
+            return
+
+    dl_client = context.bot_data.get("dl_client")
+    if not dl_client:
+        await query.edit_message_text("下载客户端未配置。")
+        return
+
+    ok = await dl_client.delete_task(task_id)
+    if ok:
+        await query.edit_message_text("✅ 任务已移除。")
+    else:
+        await query.edit_message_text("❌ 移除失败，请稍后重试。")
+
+
+async def delete_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理取消删除：delno:用户ID"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("已取消。")

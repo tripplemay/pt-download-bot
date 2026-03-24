@@ -31,6 +31,11 @@ class DownloadClientBase(ABC):
         ...
 
     @abstractmethod
+    async def delete_task(self, task_id: str) -> bool:
+        """删除指定任务（仅移除任务，不删文件），返回是否成功"""
+        ...
+
+    @abstractmethod
     async def test_connection(self) -> bool:
         """测试连接是否正常"""
         ...
