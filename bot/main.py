@@ -216,15 +216,24 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("当前没有下载任务。")
         return
 
-    lines = [f"当前下载任务 ({len(tasks)} 个):"]
-    for i, task in enumerate(tasks[:20], 1):
+    # 过滤：只显示下载中的任务（排除已完成/做种 status=8）
+    # DS v2: 2=下载中, 5=暂停, 8=做种; qBittorrent/Transmission 无此字段则全部显示
+    active = [t for t in tasks if t.get("status") not in (8,)]
+    if not active:
+        await update.message.reply_text(f"所有任务已完成（共 {len(tasks)} 个做种中）。")
+        return
+
+    lines = [f"下载中 ({len(active)} 个):"]
+    for i, task in enumerate(active[:20], 1):
         name = task.get("title") or task.get("name") or "未知"
         if len(name) > 60:
             name = name[:59] + "\u2026"
         lines.append(f"{i}. {name}")
 
-    if len(tasks) > 20:
-        lines.append(f"... 还有 {len(tasks) - 20} 个任务未显示")
+    if len(active) > 20:
+        lines.append(f"... 还有 {len(active) - 20} 个任务未显示")
+    if len(tasks) > len(active):
+        lines.append(f"（另有 {len(tasks) - len(active)} 个已完成/做种）")
 
     await update.message.reply_text("\n".join(lines))
 
