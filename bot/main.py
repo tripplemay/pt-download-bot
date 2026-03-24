@@ -194,6 +194,34 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+def _format_size(n: int) -> str:
+    """字节数转可读格式"""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+
+def _format_task_progress(task: dict) -> str:
+    """从任务数据中提取进度信息，返回格式化字符串。"""
+    total = task.get("size", 0)
+    transfer = task.get("additional", {}).get("transfer", {})
+    downloaded = transfer.get("size_downloaded", 0)
+    speed = transfer.get("speed_download", 0)
+
+    if not total:
+        return ""
+
+    pct = min(downloaded / total * 100, 100.0) if total > 0 else 0
+    parts = [f"{pct:.1f}%", f"{_format_size(downloaded)}/{_format_size(total)}"]
+
+    if speed > 0:
+        parts.append(f"{_format_size(speed)}/s")
+
+    return " | ".join(parts)
+
+
 @require_auth
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看下载客户端当前任务列表。"""
@@ -226,9 +254,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"下载中 ({len(active)} 个):"]
     for i, task in enumerate(active[:20], 1):
         name = task.get("title") or task.get("name") or "未知"
-        if len(name) > 60:
-            name = name[:59] + "\u2026"
-        lines.append(f"{i}. {name}")
+        if len(name) > 50:
+            name = name[:49] + "\u2026"
+
+        # 进度信息
+        progress = _format_task_progress(task)
+        if progress:
+            lines.append(f"{i}. {name}\n   {progress}")
+        else:
+            lines.append(f"{i}. {name}")
 
     if len(active) > 20:
         lines.append(f"... 还有 {len(active) - 20} 个任务未显示")

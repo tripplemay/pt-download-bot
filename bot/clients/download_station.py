@@ -343,7 +343,7 @@ class DownloadStationClient(DownloadClientBase):
         if p.version == 2:
             params["offset"] = "0"
             params["limit"] = "100"
-            params["additional"] = '["detail"]'
+            params["additional"] = '["detail","transfer"]'
 
         data = await self._api_request("GET", params=params)
         tasks = data.get("data", {}).get(p.list_task_key, [])
