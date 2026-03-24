@@ -1,12 +1,17 @@
 """Comprehensive tests for handler and middleware modules."""
 
+import time
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from bot.middleware import require_auth, require_owner
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
-from bot.handlers.search import search_command, more_command, _format_results, user_cache, _search_result_cache
+from bot.handlers.search import (
+    search_command, more_command, _format_results, user_cache, _search_result_cache,
+    page_callback, dl_callback, _seeders_icon, _build_keyboard,
+)
 from bot.handlers.download import download_command
 from bot.pt.base import TorrentResult
 from bot.pt.nexusphp import CookieExpiredError
@@ -1024,3 +1029,397 @@ class TestSearchCommandWebFirst:
         assert "CN.Desc.1" in titles
         assert "CN.Desc.2" in titles
         assert len(merged) == 4
+
+
+# ===========================================================================
+# bot/handlers/search.py — _seeders_icon
+# ===========================================================================
+
+class TestSeedersIcon:
+
+    def test_zero_seeders(self):
+        result = _seeders_icon(0)
+        assert "0种" in result
+        assert "🔴" in result
+
+    def test_positive_seeders(self):
+        result = _seeders_icon(5)
+        assert "5种" in result
+        assert "🟢" in result
+
+    def test_large_seeders(self):
+        result = _seeders_icon(100)
+        assert "100种" in result
+        assert "🟢" in result
+
+
+# ===========================================================================
+# bot/handlers/search.py — _build_keyboard
+# ===========================================================================
+
+class TestBuildKeyboard:
+
+    def test_first_page_multiple_pages(self):
+        """First page should have '下一页' but no '上一页'."""
+        kb = _build_keyboard(user_id=333, page=0, page_size=5, total=12)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        texts = [btn.text for btn in all_buttons]
+        callbacks = [btn.callback_data for btn in all_buttons]
+        # Download buttons 1-5
+        assert "1" in texts
+        assert "5" in texts
+        assert "dl:333:1" in callbacks
+        assert "dl:333:5" in callbacks
+        # Nav: next only
+        assert "下一页 ▶" in texts
+        assert "◀ 上一页" not in texts
+
+    def test_middle_page(self):
+        """Middle page should have both nav buttons."""
+        kb = _build_keyboard(user_id=333, page=1, page_size=5, total=15)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        texts = [btn.text for btn in all_buttons]
+        assert "◀ 上一页" in texts
+        assert "下一页 ▶" in texts
+
+    def test_last_page(self):
+        """Last page should have '上一页' but no '下一页'."""
+        kb = _build_keyboard(user_id=333, page=2, page_size=5, total=12)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        texts = [btn.text for btn in all_buttons]
+        assert "◀ 上一页" in texts
+        assert "下一页 ▶" not in texts
+        # Download buttons 11-12
+        callbacks = [btn.callback_data for btn in all_buttons]
+        assert "dl:333:11" in callbacks
+        assert "dl:333:12" in callbacks
+
+    def test_single_page_no_nav(self):
+        """Single page should have no nav buttons."""
+        kb = _build_keyboard(user_id=333, page=0, page_size=10, total=3)
+        all_buttons = [btn for row in kb.inline_keyboard for btn in row]
+        texts = [btn.text for btn in all_buttons]
+        assert "◀ 上一页" not in texts
+        assert "下一页 ▶" not in texts
+
+
+# ===========================================================================
+# bot/handlers/search.py — page_callback
+# ===========================================================================
+
+class TestPageCallback:
+
+    def _make_page_update(self, user_id, callback_data):
+        return make_update(
+            user_id=user_id, is_callback=True, callback_data=callback_data
+        )
+
+    async def test_valid_page_turn(self, db_with_users):
+        """Authorized user turns to a valid page."""
+        results = [_make_torrent(i) for i in range(1, 16)]
+        user_cache[333] = {"results": results, "page": 0, "page_size": 5}
+
+        update = self._make_page_update(333, "page:333:1")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        query.edit_message_text.assert_awaited_once()
+        text = query.edit_message_text.call_args[0][0]
+        assert "第 2/" in text
+        assert user_cache[333]["page"] == 1
+
+    async def test_unauthorized_user(self, db_with_users):
+        """Unauthorized user (not in DB) gets rejected."""
+        update = self._make_page_update(999, "page:999:0")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无权限" in second_call[0][0]
+        assert second_call[1]["show_alert"] is True
+
+    async def test_invalid_format_too_few_parts(self, db_with_users):
+        """Callback data with wrong format is rejected."""
+        update = self._make_page_update(333, "page:333")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无效" in second_call[0][0]
+
+    async def test_negative_page(self, db_with_users):
+        """Negative page number is rejected."""
+        update = self._make_page_update(333, "page:333:-1")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无效" in second_call[0][0]
+
+    async def test_non_numeric_page(self, db_with_users):
+        """Non-numeric page value is rejected."""
+        update = self._make_page_update(333, "page:333:abc")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+
+    async def test_wrong_user(self, db_with_users):
+        """User trying to page someone else's results is rejected."""
+        results = [_make_torrent(i) for i in range(1, 6)]
+        user_cache[111] = {"results": results, "page": 0, "page_size": 5}
+
+        update = self._make_page_update(333, "page:111:0")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "不是你的" in second_call[0][0]
+
+    async def test_expired_cache(self, db_with_users):
+        """User with no cache gets 'expired' message."""
+        update = self._make_page_update(333, "page:333:0")
+        context = make_context(db=db_with_users)
+        await page_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "过期" in second_call[0][0]
+
+
+# ===========================================================================
+# bot/handlers/search.py — dl_callback
+# ===========================================================================
+
+class TestDlCallback:
+
+    def _make_dl_update(self, user_id, callback_data, full_name="Test User", username="testuser"):
+        return make_update(
+            user_id=user_id, is_callback=True, callback_data=callback_data,
+            full_name=full_name, username=username,
+        )
+
+    @pytest.fixture
+    def dl_search_cache(self):
+        """Pre-populate user_cache for dl_callback tests."""
+        results = [_make_torrent(i) for i in range(1, 4)]
+        user_cache[333] = {"results": results, "page": 0, "page_size": 10}
+        return results
+
+    async def test_valid_download_success(self, db_with_users, dl_search_cache):
+        """Successful download via URL method."""
+        pt_client = AsyncMock()
+        dl_client = AsyncMock()
+        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+
+        update = self._make_dl_update(333, "dl:333:1")
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, dl_client=dl_client
+        )
+        await dl_callback(update, context)
+
+        send_calls = context.bot.send_message.call_args_list
+        texts = [c[1]["text"] for c in send_calls]
+        assert any("正在" in t or "添加下载" in t for t in texts)
+        assert any("成功" in t for t in texts)
+
+    async def test_valid_download_failure(self, db_with_users, dl_search_cache):
+        """Both URL and file methods fail."""
+        pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(side_effect=Exception("fail"))
+        dl_client = AsyncMock()
+        dl_client.add_torrent_url = AsyncMock(return_value=None)
+
+        update = self._make_dl_update(333, "dl:333:1")
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, dl_client=dl_client
+        )
+        await dl_callback(update, context)
+
+        send_calls = context.bot.send_message.call_args_list
+        texts = [c[1]["text"] for c in send_calls]
+        assert any("失败" in t for t in texts)
+
+    async def test_unauthorized_user(self, db_with_users):
+        """Unauthorized user is rejected."""
+        update = self._make_dl_update(999, "dl:999:1")
+        context = make_context(db=db_with_users)
+        await dl_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无权限" in second_call[0][0]
+
+    async def test_invalid_format(self, db_with_users):
+        """Callback data with wrong format is rejected."""
+        update = self._make_dl_update(333, "dl:333")
+        context = make_context(db=db_with_users)
+        await dl_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无效" in second_call[0][0]
+
+    async def test_expired_cache(self, db_with_users):
+        """No cache for user results in 'expired' message."""
+        update = self._make_dl_update(333, "dl:333:1")
+        context = make_context(db=db_with_users)
+        await dl_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "过期" in second_call[0][0]
+
+    async def test_no_dl_client(self, db_with_users, dl_search_cache):
+        """No download client configured."""
+        update = self._make_dl_update(333, "dl:333:1")
+        context = make_context(db=db_with_users, pt_client=AsyncMock())
+        await dl_callback(update, context)
+
+        send_calls = context.bot.send_message.call_args_list
+        texts = [c[1]["text"] for c in send_calls]
+        assert any("尚未配置" in t for t in texts)
+
+    async def test_wrong_user(self, db_with_users, dl_search_cache):
+        """User trying to download from someone else's results is rejected."""
+        update = self._make_dl_update(111, "dl:333:1")
+        context = make_context(db=db_with_users)
+        await dl_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "不是你的" in second_call[0][0]
+
+    async def test_invalid_index_zero(self, db_with_users):
+        """Index 0 is rejected as invalid."""
+        update = self._make_dl_update(333, "dl:333:0")
+        context = make_context(db=db_with_users)
+        await dl_callback(update, context)
+
+        query = update.callback_query
+        assert query.answer.await_count == 2
+        second_call = query.answer.call_args_list[1]
+        assert "无效" in second_call[0][0]
+
+    async def test_owner_download_no_notification(self, db_with_users):
+        """Owner download does not trigger self-notification."""
+        results = [_make_torrent(1)]
+        user_cache[111] = {"results": results, "page": 0, "page_size": 10}
+
+        dl_client = AsyncMock()
+        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+
+        update = self._make_dl_update(111, "dl:111:1")
+        context = make_context(
+            db=db_with_users, pt_client=AsyncMock(), dl_client=dl_client, owner_id=111
+        )
+        await dl_callback(update, context)
+
+        send_calls = context.bot.send_message.call_args_list
+        texts = [c[1]["text"] for c in send_calls]
+        assert any("成功" in t for t in texts)
+        # No notification to owner about own download
+        for call in send_calls:
+            text = call[1]["text"]
+            assert "添加了下载" not in text
+
+    async def test_non_owner_triggers_notification(self, db_with_users, dl_search_cache):
+        """Non-owner download triggers notification to owner."""
+        dl_client = AsyncMock()
+        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+
+        update = self._make_dl_update(333, "dl:333:1", full_name="Approved User")
+        context = make_context(
+            db=db_with_users, pt_client=AsyncMock(), dl_client=dl_client, owner_id=111
+        )
+        await dl_callback(update, context)
+
+        send_calls = context.bot.send_message.call_args_list
+        owner_calls = [c for c in send_calls if c[1].get("chat_id") == 111]
+        assert len(owner_calls) == 1
+        assert "添加了下载" in owner_calls[0][1]["text"]
+
+
+# ===========================================================================
+# bot/handlers/search.py — search_command (cache hit & keyword too long)
+# ===========================================================================
+
+class TestSearchCommandCacheAndValidation:
+
+    async def test_keyword_too_long(self, db_with_users):
+        """Keyword over 100 chars is rejected."""
+        long_keyword = "a" * 101
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=[long_keyword])
+        await search_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "100" in text or "过长" in text
+
+    async def test_cache_hit_with_results(self, db_with_users):
+        """When search result cache has valid entry, PT site is not queried."""
+        results = [_make_torrent(i) for i in range(1, 4)]
+        _search_result_cache["cached"] = {
+            "results": results,
+            "expires": time.time() + 300,
+        }
+
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=["cached"], page_size=10)
+        await search_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Torrent.Title.1" in text
+        assert 333 in user_cache
+        assert len(user_cache[333]["results"]) == 3
+
+    async def test_cache_hit_empty_results(self, db_with_users):
+        """Cached empty results show 'not found' message."""
+        _search_result_cache["empty"] = {
+            "results": [],
+            "expires": time.time() + 300,
+        }
+
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=["empty"], page_size=10)
+        await search_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "未找到" in text
+
+    async def test_cache_expired_not_used(self, db_with_users):
+        """Expired cache entry is not used; PT site is queried."""
+        _search_result_cache["old"] = {
+            "results": [_make_torrent(1)],
+            "expires": time.time() - 10,
+        }
+
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=[_make_torrent(99)])
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(
+            db=db_with_users, pt_client=pt_client, args=["old"], page_size=10
+        )
+        await search_command(update, context)
+
+        pt_client.search.assert_awaited_once()
+        msg_mock.edit_text.assert_awaited()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "Torrent.Title.99" in text
