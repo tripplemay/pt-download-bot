@@ -103,6 +103,13 @@ class QBittorrentClient(DownloadClientBase):
             logger.info("qBittorrent 删除任务成功: %s", task_id)
             return True
         except Exception:
+            try:
+                tasks = await self.get_tasks()
+                if not any(t.get("hash") == task_id for t in tasks):
+                    logger.info("qBittorrent 任务已不存在，视为删除成功: %s", task_id)
+                    return True
+            except Exception:
+                pass
             logger.exception("qBittorrent 删除任务失败: %s", task_id)
             return False
 

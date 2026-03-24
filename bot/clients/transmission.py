@@ -111,6 +111,13 @@ class TransmissionClient(DownloadClientBase):
             logger.info("Transmission 删除任务成功: %s", task_id)
             return True
         except Exception:
+            try:
+                tasks = await self.get_tasks()
+                if not any(str(t.get("id")) == task_id for t in tasks):
+                    logger.info("Transmission 任务已不存在，视为删除成功: %s", task_id)
+                    return True
+            except Exception:
+                pass
             logger.exception("Transmission 删除任务失败: %s", task_id)
             return False
 

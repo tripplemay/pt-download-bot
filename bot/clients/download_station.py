@@ -360,6 +360,14 @@ class DownloadStationClient(DownloadClientBase):
             logger.info("DS 删除任务成功: %s", task_id)
             return True
         except Exception:
+            # 任务可能已被其他人删除，检查是否还存在
+            try:
+                tasks = await self.get_tasks()
+                if not any(t.get("id") == task_id for t in tasks):
+                    logger.info("DS 任务已不存在，视为删除成功: %s", task_id)
+                    return True
+            except Exception:
+                pass
             logger.exception("DS 删除任务失败: %s", task_id)
             return False
 

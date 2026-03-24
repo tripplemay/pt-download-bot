@@ -366,7 +366,7 @@ async def delete_execute_callback(update: Update, context: ContextTypes.DEFAULT_
 
     ok = await dl_client.delete_task(task_id)
     if ok:
-        await query.edit_message_text("✅ 任务已移除。")
+        await query.edit_message_text("✅ 任务已移除。发送 /status 查看最新状态。")
     else:
         await query.edit_message_text("❌ 移除失败，请稍后重试。")
 
