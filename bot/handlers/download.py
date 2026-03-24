@@ -55,26 +55,26 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 先尝试 URL 方式
-    success = False
+    task_id = None
     try:
-        success = await dl_client.add_torrent_url(selected.torrent_url)
+        task_id = await dl_client.add_torrent_url(selected.torrent_url)
     except Exception:
         logger.warning("URL 方式添加种子失败，将尝试文件方式")
 
     # URL 方式失败，改用文件方式
-    if not success:
+    if task_id is None:
         try:
             torrent_bytes = await pt_client.download_torrent(selected.torrent_url)
-            success = await dl_client.add_torrent_file(
+            task_id = await dl_client.add_torrent_file(
                 torrent_bytes, f"{selected.title[:80]}.torrent"
             )
         except Exception:
             logger.exception("文件方式添加种子也失败")
 
-    if success:
-        # 记录下载日志
+    if task_id is not None:
+        # 记录下载日志（含 task_id）
         try:
-            db.log_download(user_id, selected.title, selected.size)
+            db.log_download(user_id, selected.title, selected.size, task_id=task_id)
         except Exception:
             logger.exception("记录下载日志失败")
 

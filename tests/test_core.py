@@ -249,6 +249,48 @@ class TestSettings:
 
 
 # =====================================================================
+# download_logs task_id tests
+# =====================================================================
+
+
+class TestDownloadLogsTaskId:
+
+    def test_task_id_column_exists(self, tmp_db):
+        cur = tmp_db.conn.cursor()
+        cur.execute("PRAGMA table_info(download_logs)")
+        columns = {row[1] for row in cur.fetchall()}
+        assert "task_id" in columns
+
+    def test_log_download_with_task_id(self, tmp_db):
+        tmp_db.log_download(111, "Movie.mkv", "14 GB", task_id="dbid_99")
+        result = tmp_db.get_download_by_task_id("dbid_99")
+        assert result is not None
+        assert result["telegram_id"] == 111
+        assert result["torrent_title"] == "Movie.mkv"
+        assert result["torrent_size"] == "14 GB"
+
+    def test_log_download_without_task_id(self, tmp_db):
+        tmp_db.log_download(111, "Movie.mkv", "14 GB")
+        result = tmp_db.get_download_by_task_id("")
+        assert result is None
+
+    def test_get_download_by_task_id_not_found(self, tmp_db):
+        assert tmp_db.get_download_by_task_id("nonexistent") is None
+
+    def test_get_user_task_ids(self, tmp_db):
+        tmp_db.log_download(111, "Movie1", "1 GB", task_id="dbid_1")
+        tmp_db.log_download(111, "Movie2", "2 GB", task_id="dbid_2")
+        tmp_db.log_download(222, "Movie3", "3 GB", task_id="dbid_3")
+        tmp_db.log_download(111, "Movie4", "4 GB")  # no task_id
+
+        ids = tmp_db.get_user_task_ids(111)
+        assert set(ids) == {"dbid_1", "dbid_2"}
+
+    def test_get_user_task_ids_empty(self, tmp_db):
+        assert tmp_db.get_user_task_ids(999) == []
+
+
+# =====================================================================
 # Config tests
 # =====================================================================
 

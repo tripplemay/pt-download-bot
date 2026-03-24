@@ -25,10 +25,12 @@ from bot.middleware import require_auth, require_owner
 from bot.handlers.search import search_command, more_command
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
+from bot.handlers.status import status_command
 from bot.handlers.admin import (
     users_command, pending_command, ban_command, unban_command,
     setcookie_command, cookiestatus_command,
 )
+from bot.handlers.notify import check_completed_tasks
 from bot.handlers.settings import (
     setsite_command, setpasskey_command, settmdb_command,
     setds_command, setqb_command, settr_command,
@@ -194,84 +196,6 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
-def _format_size(n: int) -> str:
-    """字节数转可读格式"""
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if abs(n) < 1024:
-            return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}PB"
-
-
-def _format_task_progress(task: dict) -> str:
-    """从任务数据中提取进度信息，返回格式化字符串。"""
-    total = task.get("size", 0)
-    transfer = task.get("additional", {}).get("transfer", {})
-    downloaded = transfer.get("size_downloaded", 0)
-    speed = transfer.get("speed_download", 0)
-
-    if not total:
-        return ""
-
-    pct = min(downloaded / total * 100, 100.0) if total > 0 else 0
-    parts = [f"{pct:.1f}%", f"{_format_size(downloaded)}/{_format_size(total)}"]
-
-    if speed > 0:
-        parts.append(f"{_format_size(speed)}/s")
-
-    return " | ".join(parts)
-
-
-@require_auth
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看下载客户端当前任务列表。"""
-    dl_client = context.bot_data.get("dl_client")
-
-    if not dl_client:
-        await update.message.reply_text(
-            "下载客户端尚未配置。\n管理员请先使用 /setds、/setqb 或 /settr 完成配置。"
-        )
-        return
-
-    try:
-        tasks = await dl_client.get_tasks()
-    except Exception:
-        logger.exception("获取下载任务列表失败")
-        await update.message.reply_text("获取任务列表失败，请稍后重试。")
-        return
-
-    if not tasks:
-        await update.message.reply_text("当前没有下载任务。")
-        return
-
-    # 过滤：只显示下载中的任务（排除已完成/做种 status=8）
-    # DS v2: 2=下载中, 5=暂停, 8=做种; qBittorrent/Transmission 无此字段则全部显示
-    active = [t for t in tasks if t.get("status") not in (8,)]
-    if not active:
-        await update.message.reply_text(f"所有任务已完成（共 {len(tasks)} 个做种中）。")
-        return
-
-    lines = [f"下载中 ({len(active)} 个):"]
-    for i, task in enumerate(active[:20], 1):
-        name = task.get("title") or task.get("name") or "未知"
-        if len(name) > 50:
-            name = name[:49] + "\u2026"
-
-        # 进度信息
-        progress = _format_task_progress(task)
-        if progress:
-            lines.append(f"{i}. {name}\n   {progress}")
-        else:
-            lines.append(f"{i}. {name}")
-
-    if len(active) > 20:
-        lines.append(f"... 还有 {len(active) - 20} 个任务未显示")
-    if len(tasks) > len(active):
-        lines.append(f"（另有 {len(tasks) - len(active)} 个已完成/做种）")
-
-    await update.message.reply_text("\n".join(lines))
-
-
 # ------------------------------------------------------------------
 # main
 # ------------------------------------------------------------------
@@ -353,7 +277,10 @@ def main():
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
 
-    # 7. 启动轮询
+    # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）
+    app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)
+
+    # 8. 启动轮询
     logger.info("Bot 启动中...")
     app.run_polling(allowed_updates=["message", "callback_query"])
 

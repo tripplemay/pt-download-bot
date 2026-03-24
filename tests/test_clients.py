@@ -148,11 +148,13 @@ class TestDownloadStationClient:
     # -- add_torrent_url -------------------------------------------------
 
     async def test_add_torrent_url_success(self, ds_client):
-        ds_client._api_request = AsyncMock(return_value={"success": True})
+        ds_client._api_request = AsyncMock(
+            return_value={"success": True, "data": {"task_id": ["dbid_99"]}}
+        )
         ds_client._profile = _v1_profile()
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is True
+        assert result is not None
         ds_client._api_request.assert_awaited_once()
 
     async def test_add_torrent_url_failure(self, ds_client):
@@ -160,7 +162,7 @@ class TestDownloadStationClient:
         ds_client._profile = _v1_profile()
         ds_client.sid = "existing_sid"
         result = await ds_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is False
+        assert result is None
 
     # -- add_torrent_file ------------------------------------------------
 
@@ -168,17 +170,17 @@ class TestDownloadStationClient:
         ds_client.sid = "existing_sid"
         ds_client._profile = _v1_profile()
         ds_client.client.post = AsyncMock(
-            return_value=_httpx_response(json_data={"success": True})
+            return_value=_httpx_response(json_data={"success": True, "data": {"task_id": ["dbid_55"]}})
         )
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
-        assert result is True
+        assert result is not None
 
     async def test_add_torrent_file_failure(self, ds_client):
         ds_client.sid = "existing_sid"
         ds_client._profile = _v1_profile()
         ds_client.client.post = AsyncMock(side_effect=Exception("network error"))
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
-        assert result is False
+        assert result is None
 
     # -- get_tasks -------------------------------------------------------
 
@@ -303,7 +305,7 @@ class TestQBittorrentClient:
             return_value=_httpx_response(json_data={"status": "ok"})
         )
         result = await qb_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is True
+        assert result is not None
 
     async def test_add_torrent_url_failure(self, qb_client):
         qb_client.logged_in = True
@@ -315,7 +317,7 @@ class TestQBittorrentClient:
             )
         )
         result = await qb_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is False
+        assert result is None
 
     # -- add_torrent_file ------------------------------------------------
 
@@ -325,7 +327,7 @@ class TestQBittorrentClient:
             return_value=_httpx_response(json_data={"status": "ok"})
         )
         result = await qb_client.add_torrent_file(b"\x00torrent", "test.torrent")
-        assert result is True
+        assert result is not None
 
     # -- get_tasks -------------------------------------------------------
 
@@ -484,10 +486,10 @@ class TestTransmissionClient:
 
     async def test_add_torrent_url_success(self, tr_client):
         tr_client._rpc_request = AsyncMock(
-            return_value={"result": "success", "arguments": {"torrent-added": {}}}
+            return_value={"result": "success", "arguments": {"torrent-added": {"id": 42}}}
         )
         result = await tr_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is True
+        assert result == "42"
         tr_client._rpc_request.assert_awaited_once_with(
             "torrent-add", {"filename": "magnet:?xt=urn:btih:abc"}
         )
@@ -497,19 +499,18 @@ class TestTransmissionClient:
             side_effect=ConnectionError("rpc fail")
         )
         result = await tr_client.add_torrent_url("magnet:?xt=urn:btih:abc")
-        assert result is False
+        assert result is None
 
     # -- add_torrent_file ------------------------------------------------
 
     async def test_add_torrent_file_success(self, tr_client):
         tr_client._rpc_request = AsyncMock(
-            return_value={"result": "success", "arguments": {"torrent-added": {}}}
+            return_value={"result": "success", "arguments": {"torrent-added": {"id": 99}}}
         )
         torrent_data = b"\x00\x01\x02torrent_content"
         result = await tr_client.add_torrent_file(torrent_data, "test.torrent")
-        assert result is True
+        assert result == "99"
 
-        # Verify base64 encoding was used
         expected_metainfo = base64.b64encode(torrent_data).decode("ascii")
         tr_client._rpc_request.assert_awaited_once_with(
             "torrent-add", {"metainfo": expected_metainfo}
@@ -520,7 +521,7 @@ class TestTransmissionClient:
             side_effect=ConnectionError("rpc fail")
         )
         result = await tr_client.add_torrent_file(b"\x00", "test.torrent")
-        assert result is False
+        assert result is None
 
     # -- get_tasks -------------------------------------------------------
 

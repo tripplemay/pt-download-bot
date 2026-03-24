@@ -461,7 +461,7 @@ class TestGracefulDegradation:
         assert "下载客户端尚未配置" in text
 
     async def test_status_without_dl_client(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
         update = make_update(user_id=333)
         context = make_context(db=db_with_users)
         # dl_client not set

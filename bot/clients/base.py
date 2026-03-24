@@ -1,20 +1,28 @@
-"""下载客户端抽象基类 — 接口契约，由 Teammate 2 实现"""
+"""下载客户端抽象基类 — 接口契约"""
 
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
 
 class DownloadClientBase(ABC):
-    """下载客户端抽象基类"""
+    """下载客户端抽象基类
+
+    add_torrent_url / add_torrent_file 返回值：
+    - 成功且有 task_id: 返回 task_id 字符串（如 "dbid_123"）
+    - 成功但无 task_id: 返回 ""（空字符串）
+    - 失败: 返回 None
+
+    调用方必须用 `if result is not None:` 判断成功（空字符串也是成功）。
+    """
 
     @abstractmethod
-    async def add_torrent_url(self, url: str) -> bool:
-        """通过 URL 添加种子下载任务，返回是否成功"""
+    async def add_torrent_url(self, url: str) -> Optional[str]:
+        """通过 URL 添加种子下载任务，返回 task_id 或 None"""
         ...
 
     @abstractmethod
-    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
-        """通过上传 .torrent 文件添加下载任务，返回是否成功"""
+    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> Optional[str]:
+        """通过上传 .torrent 文件添加下载任务，返回 task_id 或 None"""
         ...
 
     @abstractmethod

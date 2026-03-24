@@ -56,6 +56,16 @@ class Database:
             """
         )
         self.conn.commit()
+        self._migrate_tables()
+
+    def _migrate_tables(self):
+        """增量迁移：为已有表添加新列。"""
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(download_logs)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "task_id" not in columns:
+            cur.execute("ALTER TABLE download_logs ADD COLUMN task_id TEXT")
+            self.conn.commit()
 
     # ------------------------------------------------------------------
     # helpers
@@ -176,16 +186,45 @@ class Database:
         cur.execute("SELECT * FROM users ORDER BY applied_at")
         return [self._row_to_user(r) for r in cur.fetchall()]
 
-    def log_download(self, telegram_id: int, title: str, size: str):
+    def log_download(self, telegram_id: int, title: str, size: str,
+                     task_id: str = None):
         cur = self.conn.cursor()
         cur.execute(
             """
-            INSERT INTO download_logs (telegram_id, torrent_title, torrent_size)
-            VALUES (?, ?, ?)
+            INSERT INTO download_logs (telegram_id, torrent_title, torrent_size, task_id)
+            VALUES (?, ?, ?, ?)
             """,
-            (telegram_id, title, size),
+            (telegram_id, title, size, task_id),
         )
         self.conn.commit()
+
+    def get_download_by_task_id(self, task_id: str) -> Optional[dict]:
+        """根据 task_id 查找下载记录。"""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT telegram_id, torrent_title, torrent_size, created_at "
+            "FROM download_logs WHERE task_id = ?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "telegram_id": row["telegram_id"],
+                "torrent_title": row["torrent_title"],
+                "torrent_size": row["torrent_size"],
+                "created_at": row["created_at"],
+            }
+        return None
+
+    def get_user_task_ids(self, telegram_id: int) -> List[str]:
+        """获取某用户所有有 task_id 的下载记录的 task_id 列表。"""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT task_id FROM download_logs "
+            "WHERE telegram_id = ? AND task_id IS NOT NULL AND task_id != ''",
+            (telegram_id,),
+        )
+        return [row["task_id"] for row in cur.fetchall()]
 
     # ------------------------------------------------------------------
     # 权限判断

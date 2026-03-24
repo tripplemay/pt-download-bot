@@ -676,7 +676,7 @@ class TestDownloadCommand:
     async def test_url_download_success(self, db_with_users, search_cache):
         pt_client = AsyncMock()
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=True)
+        dl_client.add_torrent_url = AsyncMock(return_value="dbid_100")
 
         update = make_update(user_id=333, full_name="Approved User")
         context = make_context(
@@ -696,8 +696,8 @@ class TestDownloadCommand:
         pt_client = AsyncMock()
         pt_client.download_torrent = AsyncMock(return_value=b"torrent data")
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=False)
-        dl_client.add_torrent_file = AsyncMock(return_value=True)
+        dl_client.add_torrent_url = AsyncMock(return_value=None)
+        dl_client.add_torrent_file = AsyncMock(return_value="dbid_101")
 
         update = make_update(user_id=333)
         context = make_context(
@@ -713,7 +713,7 @@ class TestDownloadCommand:
         pt_client = AsyncMock()
         pt_client.download_torrent = AsyncMock(side_effect=Exception("fail"))
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=False)
+        dl_client.add_torrent_url = AsyncMock(return_value=None)
 
         update = make_update(user_id=333)
         context = make_context(
@@ -730,7 +730,7 @@ class TestDownloadCommand:
 
         pt_client = AsyncMock()
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=True)
+        dl_client.add_torrent_url = AsyncMock(return_value="dbid_102")
 
         update = make_update(user_id=111)
         context = make_context(

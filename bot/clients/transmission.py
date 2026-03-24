@@ -60,26 +60,36 @@ class TransmissionClient(DownloadClientBase):
             )
         return data
 
-    async def add_torrent_url(self, url: str) -> bool:
+    def _extract_task_id(self, data: dict) -> str:
+        """从 torrent-add 响应中提取 torrent ID。"""
+        args = data.get("arguments", {})
+        added = args.get("torrent-added") or args.get("torrent-duplicate")
+        if added and "id" in added:
+            return str(added["id"])
+        return ""
+
+    async def add_torrent_url(self, url: str) -> Optional[str]:
         """通过 URL 添加种子下载任务"""
         try:
-            await self._rpc_request("torrent-add", {"filename": url})
-            logger.info("Transmission 添加 URL 任务成功: %s", url)
-            return True
+            data = await self._rpc_request("torrent-add", {"filename": url})
+            task_id = self._extract_task_id(data)
+            logger.info("Transmission 添加 URL 任务成功, task_id=%s", task_id)
+            return task_id
         except Exception:
             logger.exception("Transmission 添加 URL 任务失败")
-            return False
+            return None
 
-    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
+    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> Optional[str]:
         """通过上传 .torrent 文件添加下载任务"""
         try:
             metainfo = base64.b64encode(torrent_bytes).decode("ascii")
-            await self._rpc_request("torrent-add", {"metainfo": metainfo})
-            logger.info("Transmission 添加文件任务成功: %s", filename)
-            return True
+            data = await self._rpc_request("torrent-add", {"metainfo": metainfo})
+            task_id = self._extract_task_id(data)
+            logger.info("Transmission 添加文件任务成功, task_id=%s", task_id)
+            return task_id
         except Exception:
             logger.exception("Transmission 添加文件任务失败")
-            return False
+            return None
 
     async def get_tasks(self) -> List[dict]:
         """获取当前下载任务列表"""

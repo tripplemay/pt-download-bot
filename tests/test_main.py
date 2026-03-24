@@ -75,18 +75,18 @@ class TestTestCommand:
 
 
 class TestStatusCommand:
-    """Tests for the /status command defined in main.py."""
+    """Tests for the /status command."""
 
-    async def test_status_with_tasks(self, db_with_users):
-        from bot.main import status_command
+    async def test_status_with_tasks_owner_sees_all(self, db_with_users):
+        from bot.handlers.status import status_command
 
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "Movie.2024.1080p"},
-            {"title": "Series.S01E01"},
+            {"title": "Movie.2024.1080p", "status": 2},
+            {"title": "Series.S01E01", "status": 2},
         ])
 
-        update = make_update(user_id=333)
+        update = make_update(user_id=111)  # owner sees all
         context = make_context(db=db_with_users, dl_client=dl_client)
         await status_command(update, context)
 
@@ -95,12 +95,12 @@ class TestStatusCommand:
         assert "Movie.2024.1080p" in text
 
     async def test_status_no_tasks(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
 
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[])
 
-        update = make_update(user_id=333)
+        update = make_update(user_id=111)
         context = make_context(db=db_with_users, dl_client=dl_client)
         await status_command(update, context)
 
@@ -108,12 +108,12 @@ class TestStatusCommand:
         assert "没有" in text
 
     async def test_status_error(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
 
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(side_effect=Exception("fail"))
 
-        update = make_update(user_id=333)
+        update = make_update(user_id=111)
         context = make_context(db=db_with_users, dl_client=dl_client)
         await status_command(update, context)
 
@@ -121,7 +121,7 @@ class TestStatusCommand:
         assert "失败" in text
 
     async def test_status_non_authorized_blocked(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
 
         update = make_update(user_id=999)
         context = make_context(db=db_with_users)
@@ -131,26 +131,64 @@ class TestStatusCommand:
         assert "申请" in text
 
     async def test_status_many_tasks_truncated(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
 
-        tasks = [{"title": f"Task {i}"} for i in range(25)]
+        tasks = [{"title": f"Task {i}", "status": 2} for i in range(25)]
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=tasks)
 
-        update = make_update(user_id=333)
+        update = make_update(user_id=111)
         context = make_context(db=db_with_users, dl_client=dl_client)
         await status_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "25 个" in text
         assert "还有" in text
 
     async def test_status_long_task_name_truncated(self, db_with_users):
-        from bot.main import status_command
+        from bot.handlers.status import status_command
 
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "A" * 100},
+            {"title": "A" * 100, "status": 2},
+        ])
+
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, dl_client=dl_client)
+        await status_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "\u2026" in text
+
+    async def test_status_groups_by_state(self, db_with_users):
+        from bot.handlers.status import status_command
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"title": "Downloading", "status": 2, "size": 1000, "additional": {"transfer": {"size_downloaded": 500, "speed_download": 100}}},
+            {"title": "Paused", "status": 5, "size": 2000, "additional": {"transfer": {"size_downloaded": 1000, "speed_download": 0}}},
+            {"title": "Seeding1", "status": 8},
+            {"title": "Seeding2", "status": 8},
+        ])
+
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, dl_client=dl_client)
+        await status_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "📥 下载中" in text
+        assert "⏸ 暂停" in text
+        assert "🌱 做种 2 个" in text
+
+    async def test_status_user_sees_only_own_tasks(self, db_with_users):
+        from bot.handlers.status import status_command
+
+        # User 333 has one task logged
+        db_with_users.log_download(333, "MyMovie", "1 GB", task_id="dbid_50")
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"title": "MyMovie", "id": "dbid_50", "status": 2},
+            {"title": "OtherMovie", "id": "dbid_51", "status": 2},
         ])
 
         update = make_update(user_id=333)
@@ -158,8 +196,26 @@ class TestStatusCommand:
         await status_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        # The name should be truncated (59 chars + ellipsis)
-        assert "\u2026" in text
+        assert "MyMovie" in text
+        assert "OtherMovie" not in text
+
+    async def test_status_progress_bar(self, db_with_users):
+        from bot.handlers.status import status_command
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"title": "Movie", "status": 2, "size": 1000,
+             "additional": {"transfer": {"size_downloaded": 500, "speed_download": 10}}},
+        ])
+
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, dl_client=dl_client)
+        await status_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "█" in text
+        assert "░" in text
+        assert "50.0%" in text
 
 
 class TestMainFunction:

@@ -1,7 +1,7 @@
 """qBittorrent Web API 客户端"""
 
 import logging
-from typing import List
+from typing import List, Optional
 
 import httpx
 
@@ -57,7 +57,7 @@ class QBittorrentClient(DownloadClientBase):
         resp.raise_for_status()
         return resp
 
-    async def add_torrent_url(self, url: str) -> bool:
+    async def add_torrent_url(self, url: str) -> Optional[str]:
         """通过 URL 添加种子下载任务"""
         try:
             api_url = f"{self.host}/api/v2/torrents/add"
@@ -65,12 +65,12 @@ class QBittorrentClient(DownloadClientBase):
                 "POST", api_url, data={"urls": url}
             )
             logger.info("qBittorrent 添加 URL 任务成功: %s", url)
-            return True
+            return ""  # qBittorrent add API 不返回 task_id
         except Exception:
             logger.exception("qBittorrent 添加 URL 任务失败")
-            return False
+            return None
 
-    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
+    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> Optional[str]:
         """通过上传 .torrent 文件添加下载任务"""
         try:
             api_url = f"{self.host}/api/v2/torrents/add"
@@ -79,10 +79,10 @@ class QBittorrentClient(DownloadClientBase):
             }
             resp = await self._request_with_retry("POST", api_url, files=files)
             logger.info("qBittorrent 添加文件任务成功: %s", filename)
-            return True
+            return ""
         except Exception:
             logger.exception("qBittorrent 添加文件任务失败")
-            return False
+            return None
 
     async def get_tasks(self) -> List[dict]:
         """获取当前下载任务列表"""

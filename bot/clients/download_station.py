@@ -254,7 +254,14 @@ class DownloadStationClient(DownloadClientBase):
     # 添加任务
     # ------------------------------------------------------------------
 
-    async def add_torrent_url(self, url: str) -> bool:
+    def _extract_task_id(self, data: dict) -> str:
+        """从 create 响应中提取 task_id，无则返回空字符串。"""
+        task_ids = data.get("data", {}).get("task_id", [])
+        if task_ids and isinstance(task_ids, list):
+            return task_ids[0]
+        return ""
+
+    async def add_torrent_url(self, url: str) -> Optional[str]:
         try:
             await self._ensure_profile()
             p = self._profile
@@ -275,14 +282,15 @@ class DownloadStationClient(DownloadClientBase):
             else:
                 form_data["uri"] = url
 
-            await self._api_request("POST", data=form_data)
-            logger.info("DS 添加 URL 任务成功")
-            return True
+            data = await self._api_request("POST", data=form_data)
+            task_id = self._extract_task_id(data)
+            logger.info("DS 添加 URL 任务成功, task_id=%s", task_id)
+            return task_id
         except Exception:
             logger.exception("DS 添加 URL 任务失败")
-            return False
+            return None
 
-    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> bool:
+    async def add_torrent_file(self, torrent_bytes: bytes, filename: str) -> Optional[str]:
         try:
             await self._ensure_login()
             await self._ensure_profile()
@@ -300,7 +308,6 @@ class DownloadStationClient(DownloadClientBase):
                 form_data["create_list"] = "false"
                 if p.destination_required and p.destination:
                     form_data["destination"] = p.destination
-            # v1 不需要额外字段
 
             files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
             resp = await self.client.post(self._api_url, data=form_data, files=files)
@@ -319,11 +326,12 @@ class DownloadStationClient(DownloadClientBase):
                 if not data.get("success"):
                     raise ConnectionError(f"DS 上传失败: {data.get('error', {})}")
 
-            logger.info("DS 添加文件任务成功: %s", filename)
-            return True
+            task_id = self._extract_task_id(data)
+            logger.info("DS 添加文件任务成功: %s, task_id=%s", filename, task_id)
+            return task_id
         except Exception:
             logger.exception("DS 添加文件任务失败")
-            return False
+            return None
 
     # ------------------------------------------------------------------
     # 任务列表
