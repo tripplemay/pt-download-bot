@@ -175,6 +175,7 @@ sudo docker compose up -d
 ```bash
 cd /volume1/docker/ptbot && sudo docker compose pull && sudo docker compose up -d
 ```
+更新后如果 Container Manager 面板显示异常，进入项目页面点"重新构建"刷新即可。
 
 或重新运行一键安装（自动备份数据）：
 ```bash
