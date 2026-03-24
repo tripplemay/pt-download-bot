@@ -10,7 +10,17 @@ from bot.handlers.settings import (
     settings_command,
     _check_setup_complete, _is_valid_url,
 )
+from bot.handlers.search import user_cache, _search_result_cache
 from tests.conftest import make_update, make_context
+
+
+@pytest.fixture(autouse=True)
+def _clear_caches():
+    user_cache.clear()
+    _search_result_cache.clear()
+    yield
+    user_cache.clear()
+    _search_result_cache.clear()
 
 
 # ===================================================================

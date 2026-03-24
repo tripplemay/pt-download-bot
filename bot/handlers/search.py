@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -17,6 +19,11 @@ logger = logging.getLogger(__name__)
 # 每个用户的搜索结果与分页状态
 # {user_id: {"results": [TorrentResult, ...], "page": int, "page_size": int}}
 user_cache: dict = {}
+
+# 搜索结果短期缓存，避免重复请求 PT 站
+# {keyword_normalized: {"results": [...], "expires": timestamp}}
+_search_result_cache: dict = {}
+_CACHE_TTL = 300  # 5 分钟
 
 
 def _contains_chinese(text: str) -> bool:
@@ -66,12 +73,14 @@ async def _search_web_progressive(pt_client, cookie: str, keyword: str, translat
 
     # 2) 中文原词 + 标题搜索
     if len(results) < _MIN_RESULTS:
+        await asyncio.sleep(0.5)  # 避免短时间内过多请求
         cn_title = await pt_client.search_web(keyword, cookie=cookie, search_area=0)
         logger.info("网页搜索 [中文标题] '%s' → %d 条", keyword, len(cn_title))
         results = _merge_results(results, cn_title)
 
     # 3) 中文原词 + 简介搜索（最后手段）
     if len(results) < _MIN_RESULTS:
+        await asyncio.sleep(0.5)
         cn_desc = await pt_client.search_web(keyword, cookie=cookie, search_area=1)
         logger.info("网页搜索 [中文简介] '%s' → %d 条", keyword, len(cn_desc))
         results = _merge_results(results, cn_desc)
@@ -118,6 +127,22 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyword = " ".join(context.args)
+    cache_key = keyword.lower().strip()
+
+    # 检查搜索结果缓存（5 分钟内相同关键词不重复请求 PT 站）
+    cached = _search_result_cache.get(cache_key)
+    if cached and cached["expires"] > time.time():
+        results = cached["results"]
+        user_id = update.effective_user.id
+        page_size = context.bot_data.get("page_size", 10)
+        user_cache[user_id] = {"results": results, "page": 0, "page_size": page_size}
+        if results:
+            text = _format_results(results, 0, page_size)
+            await update.message.reply_text(text)
+        else:
+            await update.message.reply_text("未找到相关种子，请尝试其他关键词。")
+        return
+
     pt_client = context.bot_data.get("pt_client")
     if not pt_client:
         await update.message.reply_text(
@@ -181,6 +206,12 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info("RSS 搜索返回 %d 条结果", len(results))
         except Exception:
             logger.exception("RSS 搜索失败")
+
+    # 缓存搜索结果（无论是否为空）
+    _search_result_cache[cache_key] = {
+        "results": results,
+        "expires": time.time() + _CACHE_TTL,
+    }
 
     # 展示结果
     user_id = update.effective_user.id

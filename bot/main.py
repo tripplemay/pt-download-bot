@@ -177,7 +177,9 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if pt_client:
         try:
-            pt_ok = await pt_client.test_connection()
+            db = context.bot_data["db"]
+            cookie = db.get_setting("pt_cookie") or ""
+            pt_ok = await pt_client.test_connection(cookie=cookie)
             lines.append(f"PT 站连接: {'正常' if pt_ok else '失败'}")
         except Exception as e:
             lines.append(f"PT 站连接: 异常 ({e})")

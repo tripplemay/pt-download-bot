@@ -1,5 +1,6 @@
 """NexusPHP 通用实现 — 基于 RSS 搜索接口"""
 
+import asyncio
 import logging
 import re
 from html.parser import HTMLParser
@@ -185,14 +186,26 @@ def _parse_torrents_html(html: str, base_url: str, passkey: str) -> List[Torrent
 class NexusPHPSite(PTSiteBase):
     """NexusPHP 站点通用实现，通过 RSS 接口搜索和下载种子"""
 
+    # 全局并发限制：同时最多 3 个 PT 站请求
+    _semaphore = asyncio.Semaphore(3)
+
     def __init__(self, base_url: str, passkey: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.passkey = passkey
         self._client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=True,
-            headers={"User-Agent": "PTBot/1.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
         )
+
+    async def _get(self, url: str, **kwargs):
+        """带并发限制的 GET 请求。"""
+        async with self._semaphore:
+            return await self._client.get(url, **kwargs)
 
     # ------------------------------------------------------------------
     # 搜索
@@ -208,7 +221,7 @@ class NexusPHPSite(PTSiteBase):
         )
         logger.debug("NexusPHP search url: %s", url.replace(self.passkey, "***"))
 
-        resp = await self._client.get(url)
+        resp = await self._get(url)
         resp.raise_for_status()
 
         feed = feedparser.parse(resp.text)
@@ -270,7 +283,7 @@ class NexusPHPSite(PTSiteBase):
             "search_area": str(search_area),
         }
         headers = {"Cookie": cookie}
-        resp = await self._client.get(url, params=params, headers=headers)
+        resp = await self._get(url, params=params, headers=headers)
         resp.raise_for_status()
 
         html = resp.text
@@ -294,16 +307,27 @@ class NexusPHPSite(PTSiteBase):
     # ------------------------------------------------------------------
     async def download_torrent(self, torrent_url: str) -> bytes:
         """下载 .torrent 文件，返回原始字节"""
-        resp = await self._client.get(torrent_url)
+        resp = await self._get(torrent_url)
         resp.raise_for_status()
         return resp.content
 
     # ------------------------------------------------------------------
     # 连接测试
     # ------------------------------------------------------------------
-    async def test_connection(self) -> bool:
-        """用一个简单搜索检测连接是否正常"""
+    async def test_connection(self, cookie: str = "") -> bool:
+        """检测 PT 站连接是否正常。有 Cookie 时用网页版，否则用 RSS。"""
         try:
+            if cookie:
+                url = f"{self.base_url}/torrents.php"
+                resp = await self._get(
+                    url, params={"search": "test"}, headers={"Cookie": cookie},
+                )
+                resp.raise_for_status()
+                html = resp.text
+                if "login.php" in str(resp.url) or '<title>Login' in html:
+                    return False
+                return True
+
             url = (
                 f"{self.base_url}/torrentrss.php"
                 f"?passkey={self.passkey}"
@@ -311,10 +335,9 @@ class NexusPHPSite(PTSiteBase):
                 f"&rows=1"
                 f"&linktype=dl"
             )
-            resp = await self._client.get(url)
+            resp = await self._get(url)
             resp.raise_for_status()
             feed = feedparser.parse(resp.text)
-            # 只要解析成功且没有 bozo 错误即视为连接正常
             return not feed.bozo
         except Exception:
             logger.exception("NexusPHP connection test failed")

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from bot.middleware import require_auth, require_owner
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
-from bot.handlers.search import search_command, more_command, _format_results, user_cache
+from bot.handlers.search import search_command, more_command, _format_results, user_cache, _search_result_cache
 from bot.handlers.download import download_command
 from bot.pt.base import TorrentResult
 from bot.pt.nexusphp import CookieExpiredError
@@ -30,11 +30,13 @@ def _make_torrent(n: int) -> TorrentResult:
 
 
 @pytest.fixture(autouse=True)
-def _clear_user_cache():
-    """Ensure user_cache is empty before and after each test."""
+def _clear_caches():
+    """Ensure caches are empty before and after each test."""
     user_cache.clear()
+    _search_result_cache.clear()
     yield
     user_cache.clear()
+    _search_result_cache.clear()
 
 
 # ===========================================================================
