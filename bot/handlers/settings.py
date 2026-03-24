@@ -10,6 +10,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_owner
+from bot.handlers.search import _search_result_cache
 from bot.pt.nexusphp import NexusPHPSite
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ async def setsite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pt_client = init_pt_client(db)
     context.bot_data["pt_client"] = pt_client
 
+    _search_result_cache.clear()
     domain = urlparse(url).netloc
     await update.message.reply_text(f"PT 站地址已设置为 {domain}")
 
@@ -143,6 +145,7 @@ async def setpasskey_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.edit_text("Passkey 已保存。请先用 /setsite 设置 PT 站地址后再验证。")
 
     db.set_setting("pt_passkey", passkey)
+    _search_result_cache.clear()
     from bot.main import init_pt_client
     context.bot_data["pt_client"] = init_pt_client(db)
     await _notify_setup_complete(update, context)

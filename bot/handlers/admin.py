@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 
 from bot.middleware import require_owner
 from bot.pt.nexusphp import CookieExpiredError
+from bot.handlers.search import _search_result_cache
 
 ROLE_EMOJI = {
     "owner": "👑",
@@ -171,6 +172,7 @@ async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 验证 Cookie：尝试用它请求 torrents.php
     if not pt_client:
         db.set_setting("pt_cookie", cookie)
+        _search_result_cache.clear()
         await msg.edit_text(
             "Cookie 已保存（PT 站尚未配置，无法验证）。\n"
             "请先用 /setsite 和 /setpasskey 配置 PT 站。"
@@ -181,6 +183,7 @@ async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = await pt_client.search_web("test", cookie=cookie, search_area=0)
         # 如果没抛 CookieExpiredError，说明 Cookie 有效
         db.set_setting("pt_cookie", cookie)
+        _search_result_cache.clear()
         await msg.edit_text(
             "Cookie 已保存并验证通过！\n"
             "网页版搜索已启用（搜索结果将更完整）。"

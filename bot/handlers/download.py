@@ -62,7 +62,7 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning("URL 方式添加种子失败，将尝试文件方式")
 
     # URL 方式失败，改用文件方式
-    if task_id is None:
+    if task_id is None and pt_client:
         try:
             torrent_bytes = await pt_client.download_torrent(selected.torrent_url)
             task_id = await dl_client.add_torrent_file(

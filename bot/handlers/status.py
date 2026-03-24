@@ -169,30 +169,43 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 收集所有可见任务（用于删除按钮）
     visible_tasks = []
 
+    # 显示上限：控制消息长度不超过 Telegram 4096 字符
+    _DL_MAX = 10
+    _PAUSE_MAX = 5
+    _SEED_MAX = 5
+
     if downloading:
         lines.append(f"📥 下载中 ({len(downloading)} 个):\n")
-        for i, task in enumerate(downloading[:20], 1):
+        for i, task in enumerate(downloading[:_DL_MAX], 1):
             lines.append(_format_task_detail(task, i))
             visible_tasks.append(task)
-        if len(downloading) > 20:
-            lines.append(f"... 还有 {len(downloading) - 20} 个未显示")
+        if len(downloading) > _DL_MAX:
+            lines.append(f"... 还有 {len(downloading) - _DL_MAX} 个未显示")
 
     if paused:
         if lines:
             lines.append("")
         lines.append(f"⏸ 暂停 ({len(paused)} 个):\n")
         offset = len(visible_tasks)
-        for i, task in enumerate(paused[:10], offset + 1):
+        for i, task in enumerate(paused[:_PAUSE_MAX], offset + 1):
             lines.append(_format_task_detail(task, i))
             visible_tasks.append(task)
+        if len(paused) > _PAUSE_MAX:
+            lines.append(f"... 还有 {len(paused) - _PAUSE_MAX} 个未显示")
 
     if seeding:
         if lines:
             lines.append("")
-        lines.append(f"🌱 做种 {len(seeding)} 个")
+        lines.append(f"🌱 做种 ({len(seeding)} 个):\n")
         offset = len(visible_tasks)
-        for i, task in enumerate(seeding[:10], offset + 1):
+        for i, task in enumerate(seeding[:_SEED_MAX], offset + 1):
+            name = task.get("title") or task.get("name") or "未知"
+            if len(name) > 50:
+                name = name[:49] + "\u2026"
+            lines.append(f"{i}. {name}")
             visible_tasks.append(task)
+        if len(seeding) > _SEED_MAX:
+            lines.append(f"... 还有 {len(seeding) - _SEED_MAX} 个未显示")
 
     if not lines:
         await update.message.reply_text("当前没有下载任务。")
@@ -234,14 +247,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 用户过滤（和 /status 逻辑一致）
-    show_mine = not is_owner or (context.args and len(context.args) > 1 and context.args[1].lower() == "mine")
     if not is_owner:
         user_task_ids = set(db.get_user_task_ids(user_id))
         tasks = [t for t in tasks if t.get("id") in user_task_ids]
 
-    # 构建可见列表（和 /status 排序一致）
+    # 构建可见列表（和 /status 显示上限一致）
     downloading, paused, seeding = _group_tasks(tasks)
-    visible = list(downloading[:20]) + list(paused[:10]) + list(seeding[:10])
+    visible = list(downloading[:10]) + list(paused[:5]) + list(seeding[:5])
 
     if index > len(visible):
         await update.message.reply_text(
@@ -281,7 +293,7 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("无权限执行此操作。", show_alert=True)
         return
 
-    parts = query.data.split(":")
+    parts = query.data.split(":", 2)
     if len(parts) != 3:
         await query.answer("无效请求。", show_alert=True)
         return
@@ -334,7 +346,7 @@ async def delete_execute_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("无权限执行此操作。", show_alert=True)
         return
 
-    parts = query.data.split(":")
+    parts = query.data.split(":", 2)
     if len(parts) != 3:
         await query.answer("无效请求。", show_alert=True)
         return

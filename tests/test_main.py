@@ -177,7 +177,7 @@ class TestStatusCommand:
         text = update.message.reply_text.call_args[0][0]
         assert "📥 下载中" in text
         assert "⏸ 暂停" in text
-        assert "🌱 做种 2 个" in text
+        assert "🌱 做种 (2 个)" in text
 
     async def test_status_user_sees_only_own_tasks(self, db_with_users):
         from bot.handlers.status import status_command
