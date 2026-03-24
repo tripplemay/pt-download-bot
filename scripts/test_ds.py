@@ -1,4 +1,4 @@
-"""测试 Download Station API 连通性"""
+"""测试 Download Station API 连通性（自动检测 v1/v2）"""
 import asyncio
 import sys
 import httpx
@@ -6,27 +6,41 @@ import httpx
 
 async def test(host, username, password):
     c = httpx.AsyncClient(timeout=30, verify=False)
-    params1 = {
-        "api": "SYNO.API.Auth",
-        "version": "6",
-        "method": "login",
-        "account": username,
-        "passwd": password,
-        "session": "DownloadStation",
-        "format": "sid",
-    }
-    r = await c.get(f"{host}/webapi/entry.cgi", params=params1)
-    print("login:", r.json())
+    api = f"{host}/webapi/entry.cgi"
 
+    # 1. 登录
+    r = await c.get(api, params={
+        "api": "SYNO.API.Auth", "version": "6", "method": "login",
+        "account": username, "passwd": password,
+        "session": "DownloadStation", "format": "sid",
+    })
+    print("login:", r.json())
     sid = r.json()["data"]["sid"]
-    params2 = {
-        "api": "SYNO.DownloadStation.Task",
-        "version": "1",
-        "method": "list",
-        "_sid": sid,
-    }
-    r2 = await c.get(f"{host}/webapi/entry.cgi", params=params2)
-    print("tasks:", r2.text[:500])
+
+    # 2. 尝试 v2 API
+    r2 = await c.get(api, params={
+        "api": "SYNO.DownloadStation2.Task", "version": "2",
+        "method": "list", "offset": "0", "limit": "10",
+        "additional": '["detail"]', "_sid": sid,
+    })
+    v2_data = r2.json()
+    if v2_data.get("success"):
+        print("v2 API 可用")
+        print("tasks:", r2.text[:1000])
+        return
+
+    # 3. 降级到 v1 API
+    r1 = await c.get(api, params={
+        "api": "SYNO.DownloadStation.Task", "version": "1",
+        "method": "list", "_sid": sid,
+    })
+    v1_data = r1.json()
+    if v1_data.get("success"):
+        print("v1 API 可用")
+        print("tasks:", r1.text[:1000])
+    else:
+        print("v1 也失败:", r1.text[:500])
+
     await c.aclose()
 
 
