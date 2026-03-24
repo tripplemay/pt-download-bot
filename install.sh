@@ -74,8 +74,12 @@ if [ -d "$INSTALL_DIR" ]; then
     cd /
 fi
 
-# 3. 创建安装目录
+# 3. 创建安装目录并修复 ACL（让 DSM File Station 和 Container Manager 可见）
 mkdir -p "$INSTALL_DIR/data"
+# 获取调用 sudo 的真实用户名（非 root）
+REAL_USER="${SUDO_USER:-$(whoami)}"
+chown -R "$REAL_USER":users "$INSTALL_DIR"
+synoacltool -enforce-inherit "$INSTALL_DIR" 2>/dev/null || true
 cd "$INSTALL_DIR"
 info "安装目录：${INSTALL_DIR}"
 
