@@ -109,6 +109,8 @@ class DownloadStationClient(DownloadClientBase):
             profile.list_version = "2"
             profile.create_api = "SYNO.DownloadStation2.Task"
             profile.create_version = "2"
+            # v2 API 字段名固定为 "url"（已验证）
+            profile.create_url_field = "url"
 
             # 发现任务列表 key：尝试 "task"（单数）和 "tasks"（复数）
             v2_data = v2_list.get("data", {})
@@ -119,9 +121,6 @@ class DownloadStationClient(DownloadClientBase):
             else:
                 profile.list_task_key = "task"
             logger.info("自检: v2 list 可用, 任务key='%s'", profile.list_task_key)
-
-            # 发现 create 的 URL 字段名：尝试用 "url"，失败则用 "uri"
-            profile.create_url_field = await self._probe_create_field()
 
             # 获取默认下载目录
             profile.destination = await self._probe_destination()
@@ -173,36 +172,6 @@ class DownloadStationClient(DownloadClientBase):
         except Exception as e:
             logger.debug("探测异常: %s → %s", params.get("api"), e)
         return None
-
-    async def _probe_create_field(self) -> str:
-        """探测 v2 create 的 URL 参数名是 'url' 还是 'uri'。
-
-        用一个无效 URL 测试，只看是哪个字段名不报 'condition' 错误。
-        """
-        dummy = "https://0.0.0.0/probe.torrent"
-        dest = await self._probe_destination()
-
-        for field_name in ("url", "uri"):
-            form_data = {
-                "api": "SYNO.DownloadStation2.Task",
-                "version": "2", "method": "create",
-                field_name: json.dumps([dummy]),
-                "destination": dest,
-                "type": "url", "create_list": "false",
-                "_sid": self.sid,
-            }
-            try:
-                resp = await self.client.post(self._api_url, data=form_data)
-                data = resp.json()
-                errors = data.get("error", {}).get("errors", {})
-                # 如果错误不是关于这个字段名的 condition，说明字段名被接受了
-                if data.get("success") or errors.get("name") != field_name:
-                    logger.info("自检: create url_field='%s' 可用", field_name)
-                    return field_name
-            except Exception:
-                pass
-
-        return "url"  # 默认
 
     async def _probe_destination(self) -> str:
         """查询默认下载目录。"""
