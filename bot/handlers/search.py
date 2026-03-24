@@ -7,7 +7,7 @@ import logging
 import re
 import time
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
@@ -88,14 +88,21 @@ async def _search_web_progressive(pt_client, cookie: str, keyword: str, translat
     return results
 
 
+def _seeders_icon(seeders: int) -> str:
+    """做种数图标：有种子绿色，无种子红色。"""
+    if seeders > 0:
+        return f"🟢 {seeders}种"
+    return "🔴 0种"
+
+
 def _format_results(results: list, page: int, page_size: int) -> str:
     """格式化当前页搜索结果。
 
-    返回形如：
-        1. 标题截断55字符  [14.37 GB]
-        2. ...
-        ---
-        第 1/3 页 | 共 25 条 | /more 翻页
+    有副标题时双行显示：
+        1. Breaking.Bad.S01.1080p.BluRay
+           绝命毒师 第一季 | 14.37 GB | 🟢 12种
+    无副标题时单行：
+        1. Breaking.Bad.S01.1080p.BluRay  [14.37 GB]
     """
     total = len(results)
     if total == 0:
@@ -109,14 +116,54 @@ def _format_results(results: list, page: int, page_size: int) -> str:
     lines = []
     for i, item in enumerate(page_results, start=start + 1):
         title = truncate(item.title, 55)
-        lines.append(f"{i}. {title}  [{item.size}]")
+
+        if item.subtitle or item.seeders > 0 or (hasattr(item, 'leechers') and item.leechers > 0):
+            # 双行格式（网页版搜索结果）
+            lines.append(f"{i}. {title}")
+            detail_parts = []
+            if item.subtitle:
+                detail_parts.append(truncate(item.subtitle, 30))
+            detail_parts.append(item.size)
+            if item.seeders > 0 or item.subtitle:
+                detail_parts.append(_seeders_icon(item.seeders))
+            lines.append(f"   {'  |  '.join(detail_parts)}")
+        else:
+            # 单行格式（RSS 搜索结果）
+            lines.append(f"{i}. {title}  [{item.size}]")
 
     lines.append("---")
     lines.append(f"第 {page + 1}/{total_pages} 页 | 共 {total} 条")
-    if page + 1 < total_pages:
-        lines.append("发送 /more 查看下一页")
 
     return "\n".join(lines)
+
+
+def _build_keyboard(user_id: int, page: int, page_size: int, total: int) -> InlineKeyboardMarkup:
+    """构建搜索结果的 Inline Keyboard（下载按钮 + 翻页按钮）。"""
+    total_pages = (total + page_size - 1) // page_size
+    start = page * page_size + 1
+    end = min(start + page_size - 1, total)
+
+    # 下载按钮：每行 5 个
+    rows = []
+    row = []
+    for i in range(start, end + 1):
+        row.append(InlineKeyboardButton(str(i), callback_data=f"dl:{user_id}:{i}"))
+        if len(row) == 5:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    # 翻页按钮
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀ 上一页", callback_data=f"page:{user_id}:{page - 1}"))
+    if page + 1 < total_pages:
+        nav_row.append(InlineKeyboardButton("下一页 ▶", callback_data=f"page:{user_id}:{page + 1}"))
+    if nav_row:
+        rows.append(nav_row)
+
+    return InlineKeyboardMarkup(rows)
 
 
 @require_auth
@@ -227,7 +274,8 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     text = _format_results(results, 0, page_size)
-    await msg.edit_text(text)
+    keyboard = _build_keyboard(user_id, 0, page_size, len(results))
+    await msg.edit_text(text, reply_markup=keyboard)
 
 
 @require_auth
@@ -251,4 +299,117 @@ async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cache["page"] = next_page
     text = _format_results(results, next_page, page_size)
-    await update.message.reply_text(text)
+    keyboard = _build_keyboard(user_id, next_page, page_size, len(results))
+    await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理翻页按钮回调：page:用户ID:页码"""
+    query = update.callback_query
+    await query.answer()
+
+    _, uid_str, page_str = query.data.split(":")
+    user_id = int(uid_str)
+    page = int(page_str)
+
+    # 仅允许本人操作
+    if query.from_user.id != user_id:
+        await query.answer("这不是你的搜索结果。", show_alert=True)
+        return
+
+    cache = user_cache.get(user_id)
+    if not cache or not cache["results"]:
+        await query.answer("搜索结果已过期，请重新搜索。", show_alert=True)
+        return
+
+    results = cache["results"]
+    page_size = cache["page_size"]
+    cache["page"] = page
+
+    text = _format_results(results, page, page_size)
+    keyboard = _build_keyboard(user_id, page, page_size, len(results))
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def dl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理下载按钮回调：dl:用户ID:序号"""
+    query = update.callback_query
+    await query.answer()
+
+    _, uid_str, index_str = query.data.split(":")
+    user_id = int(uid_str)
+    index = int(index_str)
+
+    if query.from_user.id != user_id:
+        await query.answer("这不是你的搜索结果。", show_alert=True)
+        return
+
+    cache = user_cache.get(user_id)
+    if not cache or not cache["results"]:
+        await query.answer("搜索结果已过期，请重新搜索。", show_alert=True)
+        return
+
+    results = cache["results"]
+    if index < 1 or index > len(results):
+        await query.answer("序号无效。", show_alert=True)
+        return
+
+    selected = results[index - 1]
+    dl_client = context.bot_data.get("dl_client")
+    if not dl_client:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="下载客户端尚未配置。",
+        )
+        return
+
+    pt_client = context.bot_data.get("pt_client")
+    db = context.bot_data["db"]
+    owner_id = context.bot_data["owner_id"]
+
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"正在添加下载: {selected.title[:60]} ...",
+    )
+
+    # 先 URL 方式，失败再文件方式
+    task_id = None
+    try:
+        task_id = await dl_client.add_torrent_url(selected.torrent_url)
+    except Exception:
+        logger.warning("URL 方式添加失败，尝试文件方式")
+
+    if task_id is None and pt_client:
+        try:
+            torrent_bytes = await pt_client.download_torrent(selected.torrent_url)
+            task_id = await dl_client.add_torrent_file(
+                torrent_bytes, f"{selected.title[:80]}.torrent"
+            )
+        except Exception:
+            logger.exception("文件方式也失败")
+
+    if task_id is not None:
+        try:
+            db.log_download(user_id, selected.title, selected.size, task_id=task_id)
+        except Exception:
+            logger.exception("记录下载日志失败")
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="下载任务添加成功!",
+        )
+
+        if user_id != owner_id:
+            try:
+                display = query.from_user.full_name or query.from_user.username or str(user_id)
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=f"用户 {display} 添加了下载:\n标题: {selected.title[:80]}\n大小: {selected.size}",
+                )
+            except Exception:
+                logger.exception("通知 Owner 失败")
+    else:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="下载任务添加失败，请稍后重试。",
+        )

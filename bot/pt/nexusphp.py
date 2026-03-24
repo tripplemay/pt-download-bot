@@ -43,6 +43,10 @@ class _TorrentsPageParser(HTMLParser):
     layout).  We track table nesting depth so a nested </table> does not
     prematurely end parsing, and only treat direct-child <tr> of the
     torrents table as data rows.
+
+    Also extracts:
+    - subtitle from nested table second row
+    - seeders/leechers from outer cells (pure integers after size cell)
     """
 
     def __init__(self):
@@ -54,8 +58,14 @@ class _TorrentsPageParser(HTMLParser):
         self._current: dict = {}
         self._title_buf = ""
         self._cell_buf = ""
+        self._subtitle_buf = ""
         self._capturing_title = False
         self._has_title = False
+        self._found_size = False     # 已找到 size 列
+        self._int_cells_after_size: List[str] = []  # size 之后的纯数字列
+        # 副标题：嵌套表格内第二行的文本
+        self._nested_row_count = 0
+        self._capturing_subtitle = False
 
     def handle_starttag(self, tag, attrs):
         attr_dict = dict(attrs)
@@ -72,13 +82,23 @@ class _TorrentsPageParser(HTMLParser):
             return
 
         if tag == "tr":
-            # Only start a new data row for direct children of the torrents table
             if self._table_depth == 1 and not self._in_outer_row:
                 self._in_outer_row = True
                 self._current = {}
                 self._has_title = False
                 self._capturing_title = False
+                self._capturing_subtitle = False
                 self._title_buf = ""
+                self._subtitle_buf = ""
+                self._found_size = False
+                self._int_cells_after_size = []
+                self._nested_row_count = 0
+            elif self._in_outer_row and self._table_depth > 1:
+                self._nested_row_count += 1
+                # 嵌套表格第 2 行开始捕获副标题
+                if self._nested_row_count >= 2 and "subtitle" not in self._current:
+                    self._capturing_subtitle = True
+                    self._subtitle_buf = ""
             return
 
         if not self._in_outer_row:
@@ -91,7 +111,6 @@ class _TorrentsPageParser(HTMLParser):
             href = attr_dict.get("href", "")
             if "details.php" in href and "id=" in href and not self._has_title:
                 self._current["detail_link"] = href
-                # NexusPHP often puts the full title in the <a title="..."> attr
                 title_attr = attr_dict.get("title", "")
                 if title_attr:
                     self._current["title"] = title_attr
@@ -108,6 +127,8 @@ class _TorrentsPageParser(HTMLParser):
             return
         if self._capturing_title:
             self._title_buf += data
+        if self._capturing_subtitle:
+            self._subtitle_buf += data
         if self._table_depth == 1:
             self._cell_buf += data
 
@@ -119,10 +140,8 @@ class _TorrentsPageParser(HTMLParser):
             self._table_depth -= 1
             if self._table_depth <= 0:
                 self._in_torrents_table = False
-                # Flush any pending outer row
                 if self._in_outer_row:
-                    if self._current.get("title") and self._current.get("download_link"):
-                        self.results.append(self._current)
+                    self._finalize_row()
                     self._in_outer_row = False
             return
 
@@ -133,19 +152,41 @@ class _TorrentsPageParser(HTMLParser):
                 self._has_title = True
             self._capturing_title = False
 
+        # 副标题捕获结束（嵌套行的 </tr>）
+        if tag == "tr" and self._capturing_subtitle and self._table_depth > 1:
+            sub = self._subtitle_buf.strip()
+            if sub:
+                self._current["subtitle"] = sub
+            self._capturing_subtitle = False
+
         if tag == "td" and self._in_outer_row and self._table_depth == 1:
             cell_text = self._cell_buf.strip()
-            if cell_text and re.match(
+            if cell_text and not self._found_size and re.match(
                 r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", cell_text, re.IGNORECASE
             ):
                 self._current.setdefault("size", cell_text)
+                self._found_size = True
+            elif cell_text and self._found_size and re.match(r"^\d+$", cell_text):
+                self._int_cells_after_size.append(cell_text)
             self._cell_buf = ""
 
         if tag == "tr" and self._in_outer_row and self._table_depth == 1:
-            self._in_outer_row = False
-            if self._current.get("title") and self._current.get("download_link"):
-                self.results.append(self._current)
-            self._current = {}
+            self._finalize_row()
+
+    def _finalize_row(self):
+        """提交当前行数据并重置状态。"""
+        # 从 size 之后的纯数字列中提取 seeders/leechers
+        ints = self._int_cells_after_size
+        if len(ints) >= 2:
+            self._current.setdefault("seeders", ints[0])
+            self._current.setdefault("leechers", ints[1])
+        elif len(ints) == 1:
+            self._current.setdefault("seeders", ints[0])
+
+        if self._current.get("title") and self._current.get("download_link"):
+            self.results.append(self._current)
+        self._in_outer_row = False
+        self._current = {}
 
 
 def _parse_torrents_html(html: str, base_url: str, passkey: str) -> List[TorrentResult]:
@@ -173,11 +214,25 @@ def _parse_torrents_html(html: str, base_url: str, passkey: str) -> List[Torrent
         if not size:
             size = _parse_size_from_title(title)
 
+        seeders = 0
+        try:
+            seeders = int(item.get("seeders", 0))
+        except (ValueError, TypeError):
+            pass
+        leechers = 0
+        try:
+            leechers = int(item.get("leechers", 0))
+        except (ValueError, TypeError):
+            pass
+
         results.append(TorrentResult(
             title=title,
             torrent_url=download_link,
             size=size or "N/A",
+            seeders=seeders,
+            leechers=leechers,
             link=detail_link,
+            subtitle=item.get("subtitle", ""),
         ))
 
     return results
@@ -296,6 +351,8 @@ class NexusPHPSite(PTSiteBase):
         logger.debug("search_web torrents table found: %s", has_table)
 
         results = _parse_torrents_html(html, self.base_url, self.passkey)
+        # 按做种数从高到低排序
+        results.sort(key=lambda r: r.seeders, reverse=True)
         logger.info(
             "search_web '%s' (area=%d) parsed %d results from %d chars",
             keyword, search_area, len(results), len(html),

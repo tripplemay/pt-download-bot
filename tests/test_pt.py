@@ -459,7 +459,7 @@ SAMPLE_TORRENTS_HTML = '''
 # title + subtitle layout (this is the structure that caused the original bug).
 NESTED_TABLE_HTML = '''
 <table class="torrents">
-<tr><td class="colhead">类型</td><td class="colhead">标题</td><td class="colhead">大小</td></tr>
+<tr><td class="colhead">类型</td><td class="colhead">标题</td><td class="colhead">大小</td><td class="colhead">种子</td><td class="colhead">下载</td></tr>
 <tr>
   <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
   <td class="rowfollow">
@@ -474,6 +474,8 @@ NESTED_TABLE_HTML = '''
     </table>
   </td>
   <td class="rowfollow">14.37 GB</td>
+  <td class="rowfollow">12</td>
+  <td class="rowfollow">3</td>
 </tr>
 <tr>
   <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
@@ -489,6 +491,8 @@ NESTED_TABLE_HTML = '''
     </table>
   </td>
   <td class="rowfollow">22.10 GB</td>
+  <td class="rowfollow">8</td>
+  <td class="rowfollow">1</td>
 </tr>
 <tr>
   <td class="rowfollow"><a href="cat.php?cat=401"><img src="pic/category/chd/movie.png" /></a></td>
@@ -504,6 +508,8 @@ NESTED_TABLE_HTML = '''
     </table>
   </td>
   <td class="rowfollow">30.50 GB</td>
+  <td class="rowfollow">0</td>
+  <td class="rowfollow">5</td>
 </tr>
 </table>
 '''
@@ -614,6 +620,41 @@ class TestNestedTableParsing:
         results = _parse_torrents_html(html, "https://example.com", "pk")
         assert len(results) == 1
         assert results[0].title == "Full Title From Attr"
+
+    def test_nested_table_seeders_leechers(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        assert results[0].seeders == 12
+        assert results[0].leechers == 3
+        assert results[1].seeders == 8
+        assert results[1].leechers == 1
+        assert results[2].seeders == 0
+        assert results[2].leechers == 5
+
+    def test_nested_table_subtitles(self):
+        results = _parse_torrents_html(
+            NESTED_TABLE_HTML, "https://example.com", "pk123"
+        )
+        assert results[0].subtitle == "绝命毒师 第一季 蓝光"
+        assert results[1].subtitle == "绝命毒师 第二季 蓝光"
+        assert results[2].subtitle == "绝命毒师 第三季 蓝光"
+
+    def test_no_subtitle_when_single_row(self):
+        html = '''
+        <table class="torrents">
+        <tr>
+          <td>
+            <a href="details.php?id=1"><b>Title</b></a>
+            <a href="download.php?id=1"><img /></a>
+          </td>
+          <td>1.00 GB</td>
+        </tr>
+        </table>
+        '''
+        results = _parse_torrents_html(html, "https://x.com", "pk")
+        assert len(results) == 1
+        assert results[0].subtitle == ""
 
     def test_many_entries_with_nested_tables(self):
         """Simulate a page with 50 entries, all using nested tables."""

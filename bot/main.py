@@ -22,7 +22,7 @@ from bot.clients import create_download_client
 from bot.clients.base import DownloadClientBase
 from bot.tmdb import TMDBClient
 from bot.middleware import require_auth, require_owner
-from bot.handlers.search import search_command, more_command
+from bot.handlers.search import search_command, more_command, page_callback, dl_callback
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.status import status_command
@@ -278,6 +278,8 @@ def main():
     app.add_handler(CommandHandler("settr", settr_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
+    app.add_handler(CallbackQueryHandler(dl_callback, pattern=r"^dl:"))
+    app.add_handler(CallbackQueryHandler(page_callback, pattern=r"^page:"))
 
     # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）
     app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)

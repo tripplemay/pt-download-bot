@@ -625,7 +625,6 @@ class TestFormatResults:
         text = _format_results(results, page=0, page_size=10)
         assert "第 1/3 页" in text
         assert "共 25 条" in text
-        assert "/more" in text
 
     def test_last_page_no_more(self):
         results = [_make_torrent(i) for i in range(1, 26)]

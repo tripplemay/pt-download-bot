@@ -8,12 +8,13 @@ from typing import List, Optional
 @dataclass
 class TorrentResult:
     """搜索结果数据类"""
-    title: str          # 种子标题
+    title: str          # 种子标题（主标题）
     torrent_url: str    # 种子下载链接（含 passkey）
     size: str           # 文件大小（如 "14.37 GB"）
     seeders: int = 0    # 做种数
     leechers: int = 0   # 下载数
     link: str = ""      # 详情页链接
+    subtitle: str = ""  # 副标题（中文名，网页版搜索时提取）
 
 
 class PTSiteBase(ABC):
