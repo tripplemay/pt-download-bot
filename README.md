@@ -15,9 +15,13 @@ Telegram 用户 ──▶ Bot (Docker) ──▶ PT 站搜索
 ## 功能特性
 
 - 中英文影片搜索（TMDB 自动翻译 + 渐进式精度搜索）
+- 搜索结果显示做种数（🟢/🔴）、副标题、按做种数排序
+- Inline Keyboard 一键下载，无需手动输入命令
+- 下载进度可视化（进度条 + ETA + 速度）
+- 下载完成自动推送 Telegram 通知
 - 一键推送到 Download Station / qBittorrent / Transmission
-- 多用户支持（Owner 审批制）
-- 智能搜索（Cookie 网页版 + RSS 自动切换）
+- 多用户支持（Owner 审批制，用户只能查看自己的任务）
+- 智能搜索（Cookie 网页版 + RSS 自动切换，5 分钟缓存防风控）
 - 全部配置可通过 Telegram 对话完成，无需编辑配置文件
 
 ## 准备工作
@@ -113,10 +117,11 @@ sudo docker compose up -d
 
 | 命令 | 说明 | 示例 |
 |------|------|------|
-| `/s` | 搜索影片 | `/s 星际穿越` |
-| `/dl` | 下载指定序号 | `/dl 3` |
-| `/more` | 下一页 | `/more` |
-| `/status` | 查看下载任务 | `/status` |
+| `/s` | 搜索影片（结果带 Inline 下载按钮） | `/s 星际穿越` |
+| `/dl` | 下载指定序号（也可点按钮） | `/dl 3` |
+| `/more` | 下一页（也可点翻页按钮） | `/more` |
+| `/status` | 查看下载进度（用户只看自己的） | `/status` |
+| `/status mine` | Owner 只看自己的任务 | `/status mine` |
 
 **用户管理（管理员）**
 
