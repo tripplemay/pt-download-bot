@@ -16,10 +16,20 @@ from bot.utils import truncate
 
 logger = logging.getLogger(__name__)
 
-# 每个用户的搜索结果与分页状态（上限 100 用户）
+# 每个用户的搜索结果与分页状态（LRU，上限 100 用户）
 # {user_id: {"results": [TorrentResult, ...], "page": int, "page_size": int}}
-user_cache: dict = {}
+from collections import OrderedDict
+user_cache: OrderedDict = OrderedDict()
 _USER_CACHE_MAX = 100
+
+
+def _set_user_cache(user_id: int, value: dict):
+    """设置用户缓存，超出上限时淘汰最久未使用的条目。"""
+    if user_id in user_cache:
+        user_cache.move_to_end(user_id)
+    user_cache[user_id] = value
+    while len(user_cache) > _USER_CACHE_MAX:
+        user_cache.popitem(last=False)
 
 # 搜索结果短期缓存，避免重复请求 PT 站（上限 200 条）
 # {keyword_normalized: {"results": [...], "expires": timestamp}}
@@ -187,7 +197,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         results = cached["results"]
         user_id = update.effective_user.id
         page_size = context.bot_data.get("page_size", 10)
-        user_cache[user_id] = {"results": results, "page": 0, "page_size": page_size}
+        _set_user_cache(user_id, {"results": results, "page": 0, "page_size": page_size})
         if results:
             text = _format_results(results, 0, page_size)
             await update.message.reply_text(text)
@@ -272,14 +282,14 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not results:
         await msg.edit_text("未找到相关种子，请尝试其他关键词。")
-        user_cache[user_id] = {"results": [], "page": 0, "page_size": page_size}
+        _set_user_cache(user_id, {"results": [], "page": 0, "page_size": page_size})
         return
 
-    user_cache[user_id] = {
+    _set_user_cache(user_id, {
         "results": results,
         "page": 0,
         "page_size": page_size,
-    }
+    })
 
     text = _format_results(results, 0, page_size)
     keyboard = _build_keyboard(user_id, 0, page_size, len(results))

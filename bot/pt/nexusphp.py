@@ -5,6 +5,7 @@ import logging
 import re
 from html.parser import HTMLParser
 from typing import List
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
@@ -247,20 +248,39 @@ class NexusPHPSite(PTSiteBase):
     def __init__(self, base_url: str, passkey: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.passkey = passkey
+        self._base_host = urlparse(self.base_url).netloc
         self._client = httpx.AsyncClient(
             timeout=30.0,
-            follow_redirects=True,
+            follow_redirects=False,  # 手动处理重定向，防止 passkey 跨域泄露
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": self.base_url + "/",
             },
         )
 
     async def _get(self, url: str, **kwargs):
-        """带并发限制的 GET 请求。"""
+        """带并发限制的 GET 请求，仅跟随同域名重定向（最多 3 次）。"""
         async with self._semaphore:
-            return await self._client.get(url, **kwargs)
+            for _ in range(3):
+                resp = await self._client.get(url, **kwargs)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        break
+                    # 相对路径 → 补全为绝对路径
+                    if location.startswith("/"):
+                        location = f"{self.base_url}{location}"
+                    # 仅跟随同域名重定向
+                    if urlparse(location).netloc != self._base_host:
+                        logger.warning("拒绝跨域重定向: %s", location)
+                        break
+                    url = location
+                    kwargs.pop("params", None)  # 重定向后不再带原始参数
+                    continue
+                return resp
+            return resp
 
     # ------------------------------------------------------------------
     # 搜索
@@ -364,7 +384,6 @@ class NexusPHPSite(PTSiteBase):
     # ------------------------------------------------------------------
     async def download_torrent(self, torrent_url: str) -> bytes:
         """下载 .torrent 文件，返回原始字节。校验域名防止 passkey 泄露。"""
-        from urllib.parse import urlparse
         url_host = urlparse(torrent_url).netloc
         base_host = urlparse(self.base_url).netloc
         if url_host and base_host and url_host != base_host:
