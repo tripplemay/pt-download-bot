@@ -703,12 +703,13 @@ async def ask_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     selected = titles[index - 1]
-    keyword = selected["title"]  # Use English title to search PT site
+    en_title = selected["title"]
+    cn_title = selected.get("title_cn", "")
 
-    # Show what we're searching
-    display = keyword
-    if selected.get("title_cn"):
-        display = f"{keyword} ({selected['title_cn']})"
+    # 显示搜索内容
+    display = en_title
+    if cn_title:
+        display = f"{en_title} ({cn_title})"
 
     pt_client = context.bot_data.get("pt_client")
     if not pt_client:
@@ -726,13 +727,19 @@ async def ask_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         text=f"正在搜索: {display} ...",
     )
 
-    # Search PT site
+    # Search PT site: 有中文名时优先用中文搜副标题（更精确），再用英文搜标题，合并去重
     results = []
     try:
         if cookie:
-            results = await pt_client.search_web(keyword, cookie=cookie, search_area=0)
+            if cn_title:
+                results = await pt_client.search_web(cn_title, cookie=cookie, search_area=1)
+                logger.info("中文副标题搜索 '%s' → %d 条", cn_title, len(results))
+            if len(results) < 3:
+                en_results = await pt_client.search_web(en_title, cookie=cookie, search_area=0)
+                logger.info("英文标题搜索 '%s' → %d 条", en_title, len(en_results))
+                results = _merge_results(results, en_results)
         if not results:
-            results = await pt_client.search(keyword)
+            results = await pt_client.search(en_title)
     except CookieExpiredError:
         logger.warning("Cookie 已失效")
         db.delete_setting("pt_cookie")
