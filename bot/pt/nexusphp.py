@@ -108,6 +108,12 @@ class _TorrentsPageParser(HTMLParser):
         if tag == "td" and self._table_depth == 1:
             self._cell_buf = ""
 
+        # <font class="subtitle"> 方式的副标题（非嵌套表格布局）
+        if tag == "font" and "subtitle" in attr_dict.get("class", ""):
+            if "subtitle" not in self._current:
+                self._capturing_subtitle = True
+                self._subtitle_buf = ""
+
         if tag == "a":
             href = attr_dict.get("href", "")
             if "details.php" in href and "id=" in href and not self._has_title:
@@ -153,8 +159,11 @@ class _TorrentsPageParser(HTMLParser):
                 self._has_title = True
             self._capturing_title = False
 
-        # 副标题捕获结束（嵌套行的 </tr>）
-        if tag == "tr" and self._capturing_subtitle and self._table_depth > 1:
+        # 副标题捕获结束：嵌套行的 </tr> 或 </font>
+        if self._capturing_subtitle and (
+            (tag == "tr" and self._table_depth > 1)
+            or tag == "font"
+        ):
             sub = self._subtitle_buf.strip()
             if sub:
                 self._current["subtitle"] = sub
