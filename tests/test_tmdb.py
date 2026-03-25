@@ -177,33 +177,40 @@ class TestGetPersonCredits:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "cast": [
-                {"original_title": "Movie A", "popularity": 90.0},
-                {"original_title": "Movie B", "popularity": 50.0},
+                {"original_title": "Movie A", "title": "电影A", "release_date": "2020-05-01", "vote_average": 8.0, "popularity": 90.0},
+                {"original_title": "Movie B", "title": "电影B", "release_date": "2019-03-15", "vote_average": 7.5, "popularity": 50.0},
             ],
             "crew": [],
         })
 
         result = await client.get_person_credits(12345, role="actor", media="movie")
 
-        assert result == ["Movie A", "Movie B"]
+        assert len(result) == 2
+        assert result[0]["title"] == "Movie A"
+        assert result[0]["title_cn"] == "电影A"
+        assert result[0]["year"] == 2020
+        assert result[0]["rating"] == 8.0
+        assert result[1]["title"] == "Movie B"
 
     async def test_director_credits(self):
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "cast": [
-                {"original_title": "Acted In", "popularity": 80.0},
+                {"original_title": "Acted In", "title": "参演片", "release_date": "2018-01-01", "vote_average": 6.0, "popularity": 80.0},
             ],
             "crew": [
-                {"original_title": "Directed A", "popularity": 95.0, "job": "Director"},
-                {"original_title": "Produced B", "popularity": 70.0, "job": "Producer"},
+                {"original_title": "Directed A", "title": "导演A", "release_date": "2020-06-01", "vote_average": 8.5, "popularity": 95.0, "job": "Director"},
+                {"original_title": "Produced B", "title": "制片B", "release_date": "2019-01-01", "vote_average": 7.0, "popularity": 70.0, "job": "Producer"},
             ],
         })
 
         result = await client.get_person_credits(12345, role="director", media="movie")
 
-        assert result == ["Directed A"]
-        assert "Produced B" not in result
-        assert "Acted In" not in result
+        assert len(result) == 1
+        assert result[0]["title"] == "Directed A"
+        titles = [r["title"] for r in result]
+        assert "Produced B" not in titles
+        assert "Acted In" not in titles
 
     async def test_empty_credits(self):
         client = _make_client()
@@ -220,7 +227,7 @@ class TestGetPersonCredits:
         """Should return at most 20 titles even when there are more."""
         client = _make_client()
         cast = [
-            {"original_title": f"Movie {i}", "popularity": float(100 - i)}
+            {"original_title": f"Movie {i}", "title": f"电影{i}", "release_date": f"20{i:02d}-01-01", "vote_average": 7.0, "popularity": float(100 - i)}
             for i in range(30)
         ]
         client._client.get.return_value = _mock_response({
@@ -237,15 +244,19 @@ class TestGetPersonCredits:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "cast": [
-                {"original_name": "TV Show A", "popularity": 90.0},
-                {"original_name": "TV Show B", "popularity": 50.0},
+                {"original_name": "TV Show A", "name": "电视剧A", "first_air_date": "2021-09-01", "vote_average": 8.2, "popularity": 90.0},
+                {"original_name": "TV Show B", "name": "电视剧B", "first_air_date": "2020-03-01", "vote_average": 7.8, "popularity": 50.0},
             ],
             "crew": [],
         })
 
         result = await client.get_person_credits(12345, role="actor", media="tv")
 
-        assert result == ["TV Show A", "TV Show B"]
+        assert len(result) == 2
+        assert result[0]["title"] == "TV Show A"
+        assert result[0]["title_cn"] == "电视剧A"
+        assert result[0]["year"] == 2021
+        assert result[1]["title"] == "TV Show B"
 
     async def test_all_media_combined(self):
         """media='all' queries both movie and tv endpoints."""
@@ -253,19 +264,20 @@ class TestGetPersonCredits:
         # First call: movie_credits, second call: tv_credits
         client._client.get.side_effect = [
             _mock_response({
-                "cast": [{"original_title": "Movie X", "popularity": 90.0}],
+                "cast": [{"original_title": "Movie X", "title": "电影X", "release_date": "2022-01-01", "vote_average": 8.0, "popularity": 90.0}],
                 "crew": [],
             }),
             _mock_response({
-                "cast": [{"original_name": "TV Show Y", "popularity": 80.0}],
+                "cast": [{"original_name": "TV Show Y", "name": "电视剧Y", "first_air_date": "2021-06-01", "vote_average": 7.5, "popularity": 80.0}],
                 "crew": [],
             }),
         ]
 
         result = await client.get_person_credits(12345, role="actor", media="all")
 
-        assert "Movie X" in result
-        assert "TV Show Y" in result
+        titles = [r["title"] for r in result]
+        assert "Movie X" in titles
+        assert "TV Show Y" in titles
 
 
 # ===================================================================
@@ -278,14 +290,18 @@ class TestDiscover:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "results": [
-                {"original_title": "Film A"},
-                {"original_title": "Film B"},
+                {"original_title": "Film A", "title": "影片A", "release_date": "2024-03-01", "vote_average": 7.5},
+                {"original_title": "Film B", "title": "影片B", "release_date": "2024-06-15", "vote_average": 8.0},
             ]
         })
 
         result = await client.discover(media="movie", year=2024)
 
-        assert result == ["Film A", "Film B"]
+        assert len(result) == 2
+        assert result[0]["title"] == "Film A"
+        assert result[0]["title_cn"] == "影片A"
+        assert result[0]["year"] == 2024
+        assert result[1]["title"] == "Film B"
         # Verify year param was passed
         call_kwargs = client._client.get.call_args
         params = call_kwargs[1]["params"] if "params" in call_kwargs[1] else call_kwargs.kwargs["params"]
@@ -295,13 +311,14 @@ class TestDiscover:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "results": [
-                {"original_title": "Sci-Fi Film"},
+                {"original_title": "Sci-Fi Film", "title": "科幻片", "release_date": "2024-01-01", "vote_average": 7.0},
             ]
         })
 
         result = await client.discover(media="movie", genre="sci-fi")
 
-        assert result == ["Sci-Fi Film"]
+        assert len(result) == 1
+        assert result[0]["title"] == "Sci-Fi Film"
         call_kwargs = client._client.get.call_args
         params = call_kwargs[1]["params"] if "params" in call_kwargs[1] else call_kwargs.kwargs["params"]
         assert params["with_genres"] == 878
@@ -318,13 +335,15 @@ class TestDiscover:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "results": [
-                {"original_name": "TV Drama A"},
+                {"original_name": "TV Drama A", "name": "电视剧A", "first_air_date": "2024-04-01", "vote_average": 8.0},
             ]
         })
 
         result = await client.discover(media="tv", year=2024)
 
-        assert result == ["TV Drama A"]
+        assert len(result) == 1
+        assert result[0]["title"] == "TV Drama A"
+        assert result[0]["title_cn"] == "电视剧A"
         call_kwargs = client._client.get.call_args
         params = call_kwargs[1]["params"] if "params" in call_kwargs[1] else call_kwargs.kwargs["params"]
         assert params["first_air_date_year"] == 2024
@@ -333,13 +352,14 @@ class TestDiscover:
         client = _make_client()
         client._client.get.return_value = _mock_response({
             "results": [
-                {"original_title": "Korean Film"},
+                {"original_title": "Korean Film", "title": "韩国片", "release_date": "2024-01-01", "vote_average": 7.5},
             ]
         })
 
         result = await client.discover(media="movie", region="KR")
 
-        assert result == ["Korean Film"]
+        assert len(result) == 1
+        assert result[0]["title"] == "Korean Film"
         call_kwargs = client._client.get.call_args
         params = call_kwargs[1]["params"] if "params" in call_kwargs[1] else call_kwargs.kwargs["params"]
         assert params["with_origin_country"] == "KR"

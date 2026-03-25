@@ -11,6 +11,7 @@ from bot.handlers.admin import users_command, pending_command, ban_command, unba
 from bot.handlers.search import (
     search_command, more_command, _format_results, user_cache, _search_result_cache,
     page_callback, dl_callback, _seeders_icon, _build_keyboard, ask_command,
+    ask_title_cache,
 )
 from bot.handlers.download import download_command
 from bot.pt.base import TorrentResult
@@ -39,9 +40,11 @@ def _clear_caches():
     """Ensure caches are empty before and after each test."""
     user_cache.clear()
     _search_result_cache.clear()
+    ask_title_cache.clear()
     yield
     user_cache.clear()
     _search_result_cache.clear()
+    ask_title_cache.clear()
 
 
 # ===========================================================================
@@ -1518,14 +1521,7 @@ class TestAskCommand:
         assert msg_mock.edit_text.await_count >= 1
 
     async def test_tmdb_person_credits_mode(self, db_with_users):
-        """AI returns tmdb/person_credits mode -> queries TMDB then searches PT."""
-        results = [TorrentResult(
-            title="Movie.A.2024.1080p",
-            torrent_url="http://x/download.php?id=10",
-            size="5 GB",
-            seeders=3,
-        )]
-
+        """AI returns tmdb/person_credits mode -> queries TMDB then shows title list."""
         ai_client = AsyncMock()
         ai_client.parse_intent = AsyncMock(return_value={
             "mode": "tmdb",
@@ -1536,10 +1532,12 @@ class TestAskCommand:
         })
         tmdb_client = AsyncMock()
         tmdb_client.search_person = AsyncMock(return_value=525)
-        tmdb_client.get_person_credits = AsyncMock(return_value=["Movie A", "Movie B"])
+        tmdb_client.get_person_credits = AsyncMock(return_value=[
+            {"title": "Movie A", "title_cn": "电影A", "year": 2020, "rating": 8.0},
+            {"title": "Movie B", "title_cn": "电影B", "year": 2018, "rating": 7.5},
+        ])
 
         pt_client = AsyncMock()
-        pt_client.search = AsyncMock(return_value=results)
 
         msg_mock = AsyncMock()
         update = make_update(user_id=333)
@@ -1552,6 +1550,9 @@ class TestAskCommand:
         tmdb_client.search_person.assert_awaited_once_with("诺兰")
         tmdb_client.get_person_credits.assert_awaited_once_with(525, role="director", media="movie")
         assert msg_mock.edit_text.await_count >= 1
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "Movie A" in text
+        assert 333 in ask_title_cache
 
     async def test_tmdb_person_not_found(self, db_with_users):
         """TMDB person not found -> shows error message."""
@@ -1581,14 +1582,7 @@ class TestAskCommand:
         assert "未找到" in text
 
     async def test_tmdb_discover_mode(self, db_with_users):
-        """AI returns tmdb/discover mode -> discovers then searches PT."""
-        results = [TorrentResult(
-            title="Korean.Film.2024.1080p",
-            torrent_url="http://x/download.php?id=20",
-            size="8 GB",
-            seeders=10,
-        )]
-
+        """AI returns tmdb/discover mode -> discovers then shows title list."""
         ai_client = AsyncMock()
         ai_client.parse_intent = AsyncMock(return_value={
             "mode": "tmdb",
@@ -1599,10 +1593,11 @@ class TestAskCommand:
             "region": "KR",
         })
         tmdb_client = AsyncMock()
-        tmdb_client.discover = AsyncMock(return_value=["Korean Film"])
+        tmdb_client.discover = AsyncMock(return_value=[
+            {"title": "Korean Film", "title_cn": "韩国片", "year": 2024, "rating": 7.5},
+        ])
 
         pt_client = AsyncMock()
-        pt_client.search = AsyncMock(return_value=results)
 
         msg_mock = AsyncMock()
         update = make_update(user_id=333)
@@ -1616,6 +1611,9 @@ class TestAskCommand:
             media="movie", year=2024, genre="action", region="KR",
         )
         assert msg_mock.edit_text.await_count >= 1
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "Korean Film" in text
+        assert 333 in ask_title_cache
 
     async def test_no_pt_client(self, db_with_users):
         """PT client not configured -> prompt to set up."""
@@ -1644,7 +1642,7 @@ class TestAskCommand:
         assert "200" in text or "过长" in text
 
     async def test_recommend_no_pt_results(self, db_with_users):
-        """Recommend mode but PT has no results -> shows not found."""
+        """Recommend mode shows title list for selection."""
         ai_client = AsyncMock()
         ai_client.parse_intent = AsyncMock(return_value={
             "mode": "recommend",
@@ -1652,7 +1650,6 @@ class TestAskCommand:
             "reason": "推荐理由",
         })
         pt_client = AsyncMock()
-        pt_client.search = AsyncMock(return_value=[])
 
         msg_mock = AsyncMock()
         update = make_update(user_id=333)
@@ -1662,6 +1659,7 @@ class TestAskCommand:
         context.bot_data["tmdb_client"] = None
 
         await ask_command(update, context)
-        msg_mock.edit_text.assert_awaited()
+        assert msg_mock.edit_text.await_count >= 1
         text = msg_mock.edit_text.call_args[0][0]
-        assert "未找到" in text
+        assert "Obscure Film" in text
+        assert 333 in ask_title_cache

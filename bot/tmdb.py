@@ -114,18 +114,14 @@ class TMDBClient:
             logger.warning("TMDB 人物搜索失败: %s", name, exc_info=True)
         return None
 
-    async def get_person_credits(self, person_id: int, role: str = "actor", media: str = "movie") -> list[str]:
-        """获取人物参演/执导的影视作品英文名列表。
-
-        Args:
-            person_id: TMDB person ID
-            role: "actor" or "director"
-            media: "movie", "tv", or "all"
+    async def get_person_credits(self, person_id: int, role: str = "actor", media: str = "movie") -> list[dict]:
+        """获取人物参演/执导的影视作品列表。
 
         Returns:
-            list[str]: 英文名列表，按 popularity 降序，最多 20 部
+            list[dict]: 每项含 title(英文), title_cn(中文), year, rating。
+            按 popularity 降序，最多 20 部。
         """
-        titles = []
+        items_all = []
 
         endpoints = []
         if media in ("movie", "all"):
@@ -135,37 +131,53 @@ class TMDBClient:
 
         for media_type, credit_type in endpoints:
             url = f"{self.BASE_URL}/person/{person_id}/{credit_type}"
-            params = {"api_key": self.api_key, "language": "en-US"}
+            params = {"api_key": self.api_key, "language": "zh-CN"}
             try:
                 resp = await self._client.get(url, params=params)
                 resp.raise_for_status()
                 data = resp.json()
 
                 if role == "director":
-                    # Directors are in "crew" with job="Director"
-                    items = [
-                        c for c in data.get("crew", [])
-                        if c.get("job") == "Director"
-                    ]
+                    items = [c for c in data.get("crew", []) if c.get("job") == "Director"]
                 else:
                     items = data.get("cast", [])
 
-                # Sort by popularity descending
                 items.sort(key=lambda x: x.get("popularity", 0), reverse=True)
 
                 title_key = "original_title" if media_type == "movie" else "original_name"
+                cn_key = "title" if media_type == "movie" else "name"
+                date_key = "release_date" if media_type == "movie" else "first_air_date"
+
                 for item in items:
-                    name = item.get(title_key, "")
-                    if name and name not in titles:
-                        titles.append(name)
+                    en_name = item.get(title_key, "")
+                    if not en_name:
+                        continue
+                    cn_name = item.get(cn_key, "")
+                    year = 0
+                    date_str = item.get(date_key, "")
+                    if date_str and len(date_str) >= 4:
+                        try:
+                            year = int(date_str[:4])
+                        except ValueError:
+                            pass
+                    rating = item.get("vote_average", 0)
+
+                    # Deduplicate by English title
+                    if not any(d["title"] == en_name for d in items_all):
+                        items_all.append({
+                            "title": en_name,
+                            "title_cn": cn_name if cn_name != en_name else "",
+                            "year": year,
+                            "rating": round(rating, 1),
+                        })
             except Exception:
                 logger.warning("TMDB 获取人物作品失败: person_id=%d", person_id, exc_info=True)
 
-        return titles[:20]  # Limit to top 20
+        return items_all[:20]
 
     async def discover(self, media: str = "movie", year: int = None,
-                       genre: str = None, region: str = None) -> list[str]:
-        """按条件发现影视作品，返回英文名列表。"""
+                       genre: str = None, region: str = None) -> list[dict]:
+        """按条件发现影视作品，返回作品列表。"""
         genre_map = {
             "action": 28, "adventure": 12, "animation": 16, "comedy": 35,
             "crime": 80, "documentary": 99, "drama": 18, "family": 10751,
@@ -185,7 +197,7 @@ class TMDBClient:
         url = f"{self.BASE_URL}/discover/{endpoint}"
         params = {
             "api_key": self.api_key,
-            "language": "en-US",
+            "language": "zh-CN",
             "sort_by": "popularity.desc",
         }
 
@@ -214,7 +226,29 @@ class TMDBClient:
             results = data.get("results", [])
 
             title_key = "original_title" if endpoint == "movie" else "original_name"
-            return [r[title_key] for r in results if r.get(title_key)][:20]
+            cn_key = "title" if endpoint == "movie" else "name"
+            date_key = "release_date" if endpoint == "movie" else "first_air_date"
+
+            items = []
+            for r in results:
+                en_name = r.get(title_key, "")
+                if not en_name:
+                    continue
+                cn_name = r.get(cn_key, "")
+                year_val = 0
+                date_str = r.get(date_key, "")
+                if date_str and len(date_str) >= 4:
+                    try:
+                        year_val = int(date_str[:4])
+                    except ValueError:
+                        pass
+                items.append({
+                    "title": en_name,
+                    "title_cn": cn_name if cn_name != en_name else "",
+                    "year": year_val,
+                    "rating": round(r.get("vote_average", 0), 1),
+                })
+            return items[:20]
         except Exception:
             logger.warning("TMDB discover 失败", exc_info=True)
             return []

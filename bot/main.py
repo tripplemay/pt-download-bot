@@ -23,7 +23,7 @@ from bot.clients.base import DownloadClientBase
 from bot.tmdb import TMDBClient
 from bot.middleware import require_auth, require_owner
 from bot.ai import AIClient
-from bot.handlers.search import search_command, more_command, page_callback, dl_callback, ask_command
+from bot.handlers.search import search_command, more_command, page_callback, dl_callback, ask_command, ask_select_callback
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.status import (
@@ -300,6 +300,7 @@ def main():
     app.add_handler(CommandHandler("setmodel", setmodel_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
+    app.add_handler(CallbackQueryHandler(ask_select_callback, pattern=r"^ask:"))
     app.add_handler(CallbackQueryHandler(dl_callback, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern=r"^page:"))
     app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^cdel:"))
