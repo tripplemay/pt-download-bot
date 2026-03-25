@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
 from bot.pt.nexusphp import CookieExpiredError
-from bot.utils import truncate
+from bot.utils import truncate, parse_title_tags
 
 logger = logging.getLogger(__name__)
 
@@ -47,34 +47,43 @@ def _contains_chinese(text: str) -> bool:
 _MIN_RESULTS = 3
 
 
+def _extract_torrent_id(url: str) -> str:
+    """从下载链接中提取种子 ID。如 download.php?id=12345 → '12345'"""
+    m = re.search(r'[?&]id=(\d+)', url)
+    return m.group(1) if m else url  # Fallback to full URL if no ID found
+
+
 def _merge_results(existing: list, new: list) -> list:
-    """将 new 中不重复的结果追加到 existing，按 torrent_url 去重。"""
-    seen = {r.torrent_url for r in existing}
+    """将 new 中不重复的结果追加到 existing，按种子 ID 去重。"""
+    seen = {_extract_torrent_id(r.torrent_url) for r in existing}
     merged = list(existing)
     for r in new:
-        if r.torrent_url not in seen:
+        tid = _extract_torrent_id(r.torrent_url)
+        if tid not in seen:
             merged.append(r)
-            seen.add(r.torrent_url)
+            seen.add(tid)
     return merged
 
 
-async def _search_web_progressive(pt_client, cookie: str, keyword: str, translated: str | None) -> list:
-    """按精准度逐级扩大搜索范围，避免一上来就搜简介导致大量无关结果。
+async def _search_web_progressive(pt_client, cookie: str, keyword: str, translated_keywords: list[str]) -> list:
+    """按精准度逐级扩大搜索范围。
 
     优先级（从精准到宽泛）：
-    1. 英文翻译 + 标题搜索  （最精准）
+    1. 每个英文翻译 + 标题搜索（最精准）
     2. 中文原词 + 标题搜索
-    3. 中文原词 + 简介搜索  （最宽泛，最后手段）
-
-    非中文关键词只执行标题搜索。
-    每级仅在前一级结果不足 _MIN_RESULTS 条时才触发。
+    3. 中文原词 + 简介搜索（最宽泛，最后手段）
     """
     results: list = []
 
-    # 1) 英文翻译 + 标题搜索（最精准）
-    if translated:
-        results = await pt_client.search_web(translated, cookie=cookie, search_area=0)
-        logger.info("网页搜索 [英文标题] '%s' → %d 条", translated, len(results))
+    # 1) 每个英文翻译 + 标题搜索
+    for en_kw in translated_keywords:
+        if len(results) >= _MIN_RESULTS:
+            break
+        if results:
+            await asyncio.sleep(0.5)
+        batch = await pt_client.search_web(en_kw, cookie=cookie, search_area=0)
+        logger.info("网页搜索 [英文标题] '%s' → %d 条", en_kw, len(batch))
+        results = _merge_results(results, batch)
 
     # 非中文关键词到此结束
     if not _contains_chinese(keyword):
@@ -85,7 +94,8 @@ async def _search_web_progressive(pt_client, cookie: str, keyword: str, translat
 
     # 2) 中文原词 + 标题搜索
     if len(results) < _MIN_RESULTS:
-        await asyncio.sleep(0.5)  # 避免短时间内过多请求
+        if results:
+            await asyncio.sleep(0.5)
         cn_title = await pt_client.search_web(keyword, cookie=cookie, search_area=0)
         logger.info("网页搜索 [中文标题] '%s' → %d 条", keyword, len(cn_title))
         results = _merge_results(results, cn_title)
@@ -110,11 +120,10 @@ def _seeders_icon(seeders: int) -> str:
 def _format_results(results: list, page: int, page_size: int) -> str:
     """格式化当前页搜索结果。
 
-    有副标题时双行显示：
-        1. Breaking.Bad.S01.1080p.BluRay
-           绝命毒师 第一季 | 14.37 GB | 🟢 12种
-    无副标题时单行：
-        1. Breaking.Bad.S01.1080p.BluRay  [14.37 GB]
+    三行格式：
+        1. Interstellar 2014 IMAX
+           2160p | HEVC | BluRay REMUX | DTS-HD MA
+           星际穿越 IMAX版 | 95.6 GB | 🟢 12种
     """
     total = len(results)
     if total == 0:
@@ -127,21 +136,30 @@ def _format_results(results: list, page: int, page_size: int) -> str:
 
     lines = []
     for i, item in enumerate(page_results, start=start + 1):
-        title = truncate(item.title, 55)
+        tags = parse_title_tags(item.title)
 
-        if item.subtitle or item.seeders > 0 or (hasattr(item, 'leechers') and item.leechers > 0):
-            # 双行格式（网页版搜索结果）
-            lines.append(f"{i}. {title}")
-            detail_parts = []
-            if item.subtitle:
-                detail_parts.append(truncate(item.subtitle, 30))
-            detail_parts.append(item.size)
-            if item.seeders > 0 or item.subtitle:
-                detail_parts.append(_seeders_icon(item.seeders))
-            lines.append(f"   {'  |  '.join(detail_parts)}")
+        # Line 1: Clean title (or fallback to truncated original)
+        clean = tags["clean_title"]
+        if clean:
+            lines.append(f"{i}. {truncate(clean, 55)}")
         else:
-            # 单行格式（RSS 搜索结果）
-            lines.append(f"{i}. {title}  [{item.size}]")
+            lines.append(f"{i}. {truncate(item.title, 55)}")
+
+        # Line 2: Technical tags (only if any tag was extracted)
+        tag_parts = []
+        for key in ("resolution", "codec", "source", "audio", "hdr"):
+            if tags[key]:
+                tag_parts.append(tags[key])
+        if tag_parts:
+            lines.append(f"   {' | '.join(tag_parts)}")
+
+        # Line 3: Subtitle + size + seeders
+        detail_parts = []
+        if item.subtitle:
+            detail_parts.append(truncate(item.subtitle, 30))
+        detail_parts.append(item.size)
+        detail_parts.append(_seeders_icon(item.seeders))
+        lines.append(f"   {'  |  '.join(detail_parts)}")
 
     lines.append("---")
     lines.append(f"第 {page + 1}/{total_pages} 页 | 共 {total} 条")
@@ -200,7 +218,8 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _set_user_cache(user_id, {"results": results, "page": 0, "page_size": page_size})
         if results:
             text = _format_results(results, 0, page_size)
-            await update.message.reply_text(text)
+            keyboard = _build_keyboard(user_id, 0, page_size, len(results))
+            await update.message.reply_text(text, reply_markup=keyboard)
         else:
             await update.message.reply_text("未找到相关种子，请尝试其他关键词。")
         return
@@ -218,17 +237,18 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"正在搜索: {keyword} ...")
 
     # Step 1: TMDB 翻译中文 → 英文
-    translated_keyword = None
+    translated_keywords = []  # Changed from single string to list
     if _contains_chinese(keyword) and tmdb_client:
         try:
-            translated_keyword = await tmdb_client.translate(keyword)
+            translated_keywords = await tmdb_client.translate(keyword)
         except Exception:
             logger.warning("TMDB 翻译异常", exc_info=True)
 
-        if translated_keyword:
-            logger.info("TMDB 翻译: %s → %s", keyword, translated_keyword)
+        if translated_keywords:
+            display = " / ".join(translated_keywords)
+            logger.info("TMDB 翻译: %s → %s", keyword, display)
             try:
-                await msg.edit_text(f"正在搜索: {keyword} → {translated_keyword} ...")
+                await msg.edit_text(f"正在搜索: {keyword} → {display} ...")
             except Exception:
                 pass
 
@@ -239,7 +259,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cookie:
         try:
             results = await _search_web_progressive(
-                pt_client, cookie, keyword, translated_keyword,
+                pt_client, cookie, keyword, translated_keywords,
             )
             if results:
                 logger.info("网页版搜索返回 %d 条结果", len(results))
@@ -261,13 +281,16 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Step 3: 降级到 RSS（没有 Cookie 或网页搜索无结果）
     if not results:
-        rss_keyword = translated_keyword or keyword
+        rss_keyword = translated_keywords[0] if translated_keywords else keyword
         logger.info("RSS 搜索关键词: %s", rss_keyword)
         try:
             results = await pt_client.search(rss_keyword)
             logger.info("RSS 搜索返回 %d 条结果", len(results))
         except Exception:
             logger.exception("RSS 搜索失败")
+
+    # 统一按做种数降序排序
+    results.sort(key=lambda r: r.seeders, reverse=True)
 
     # 缓存搜索结果（无论是否为空），超出上限时淘汰最旧条目
     if len(_search_result_cache) >= _SEARCH_CACHE_MAX:

@@ -526,7 +526,7 @@ class TestSearchCommand:
         # Results shown via msg.edit_text
         msg_mock.edit_text.assert_awaited()
         result_text = msg_mock.edit_text.call_args[0][0]
-        assert "Torrent.Title.1" in result_text
+        assert "Torrent Title" in result_text
         assert "1.37 GB" in result_text
 
         # user_cache populated
@@ -888,7 +888,7 @@ class TestSearchCommandWebFirst:
         # Results displayed
         msg_mock.edit_text.assert_awaited()
         text = msg_mock.edit_text.call_args[0][0]
-        assert "Torrent.Title.1" in text
+        assert "Torrent Title" in text
 
     async def test_fallback_to_rss_when_no_cookie(self, db_with_users):
         """When no cookie is set, RSS search is used."""
@@ -943,7 +943,7 @@ class TestSearchCommandWebFirst:
         # Results displayed
         msg_mock.edit_text.assert_awaited()
         text = msg_mock.edit_text.call_args[0][0]
-        assert "Torrent.Title.1" in text
+        assert "Torrent Title" in text
 
     async def test_web_search_progressive_en_title_first(self, db_with_users):
         """Chinese keyword + TMDB translation: EN title search runs first and is most precise."""
@@ -961,7 +961,7 @@ class TestSearchCommandWebFirst:
         pt_client.search = AsyncMock(return_value=[])
 
         tmdb_client = AsyncMock()
-        tmdb_client.translate = AsyncMock(return_value="EnglishTitle")
+        tmdb_client.translate = AsyncMock(return_value=["EnglishTitle"])
 
         msg_mock = AsyncMock()
         update = make_update(user_id=333)
@@ -1007,7 +1007,7 @@ class TestSearchCommandWebFirst:
         pt_client.search = AsyncMock(return_value=[])
 
         tmdb_client = AsyncMock()
-        tmdb_client.translate = AsyncMock(return_value="EnglishTitle")
+        tmdb_client.translate = AsyncMock(return_value=["EnglishTitle"])
 
         msg_mock = AsyncMock()
         update = make_update(user_id=333)
@@ -1383,7 +1383,10 @@ class TestSearchCommandCacheAndValidation:
         await search_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "Torrent.Title.1" in text
+        assert "Torrent Title" in text
+        assert "条" in text
+        # P0 fix: cache hit with results now includes keyboard
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
         assert 333 in user_cache
         assert len(user_cache[333]["results"]) == 3
 
@@ -1422,4 +1425,4 @@ class TestSearchCommandCacheAndValidation:
         pt_client.search.assert_awaited_once()
         msg_mock.edit_text.assert_awaited()
         text = msg_mock.edit_text.call_args[0][0]
-        assert "Torrent.Title.99" in text
+        assert "Torrent Title 99" in text

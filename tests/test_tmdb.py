@@ -30,12 +30,12 @@ class TestSearchMovieName:
     async def test_search_movie_name_success(self):
         client = _make_client()
         client._client.get.return_value = _mock_response(
-            {"results": [{"original_title": "The Crown"}]}
+            {"results": [{"original_title": "The Crown", "popularity": 85.5}]}
         )
 
         result = await client.search_movie_name("王冠")
 
-        assert result == "The Crown"
+        assert result == {"name": "The Crown", "popularity": 85.5}
 
     async def test_search_movie_name_no_results(self):
         client = _make_client()
@@ -63,12 +63,12 @@ class TestSearchTvName:
     async def test_search_tv_name_success(self):
         client = _make_client()
         client._client.get.return_value = _mock_response(
-            {"results": [{"original_name": "The Crown"}]}
+            {"results": [{"original_name": "The Crown", "popularity": 72.3}]}
         )
 
         result = await client.search_tv_name("王冠")
 
-        assert result == "The Crown"
+        assert result == {"name": "The Crown", "popularity": 72.3}
 
     async def test_search_tv_name_no_results(self):
         client = _make_client()
@@ -87,26 +87,26 @@ class TestTranslate:
 
     async def test_translate_movie_found(self):
         client = _make_client()
-        # search_movie_name returns a hit
+        # Both calls return the same mock; movie hit + TV hit with same name
         client._client.get.return_value = _mock_response(
-            {"results": [{"original_title": "The Crown"}]}
+            {"results": [{"original_title": "The Crown", "original_name": "The Crown", "popularity": 85.5}]}
         )
 
         result = await client.translate("王冠")
 
-        assert result == "The Crown"
+        assert "The Crown" in result
 
     async def test_translate_tv_fallback(self):
         client = _make_client()
         # First call (movie) returns nothing, second call (TV) returns a hit
         client._client.get.side_effect = [
             _mock_response({"results": []}),
-            _mock_response({"results": [{"original_name": "The Crown"}]}),
+            _mock_response({"results": [{"original_name": "The Crown", "popularity": 72.3}]}),
         ]
 
         result = await client.translate("王冠")
 
-        assert result == "The Crown"
+        assert result == ["The Crown"]
 
     async def test_translate_nothing_found(self):
         client = _make_client()
@@ -117,7 +117,7 @@ class TestTranslate:
 
         result = await client.translate("不存在")
 
-        assert result is None
+        assert result == []
 
 
 # ===================================================================
