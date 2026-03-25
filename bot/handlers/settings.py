@@ -6,7 +6,7 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from telegram import Update
+from telegram import ForceReply, Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_owner
@@ -70,9 +70,8 @@ async def setsite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setsite <URL> — 设置 PT 站地址。"""
     if not context.args:
         await update.message.reply_text(
-            "用法：/setsite &lt;PT站地址&gt;\n"
-            "例如：/setsite https://ptchdbits.co",
-            parse_mode="HTML",
+            "请输入 PT 站地址：\n例如：https://ptchdbits.co",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -109,8 +108,8 @@ async def setpasskey_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not context.args:
         await context.bot.send_message(
             chat_id=chat_id,
-            text="用法：/setpasskey &lt;Passkey&gt;",
-            parse_mode="HTML",
+            text="请输入 Passkey：",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -164,11 +163,8 @@ async def settmdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                "用法：/settmdb &lt;API_Key&gt;\n\n"
-                "免费注册：https://www.themoviedb.org/settings/api"
-            ),
-            parse_mode="HTML",
+            text="请输入 TMDB API Key：\n免费注册：https://www.themoviedb.org/settings/api",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -202,9 +198,9 @@ async def _set_dl_client(
     if not context.args or len(context.args) < 3:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"用法：/set{client_type[:2]} &lt;地址&gt; &lt;用户名&gt; &lt;密码&gt;\n"
-                 f"例如：/set{client_type[:2]} http://localhost:5000 admin password123",
-            parse_mode="HTML",
+            text=f"请输入 {display_name} 连接信息：\n格式：地址 用户名 密码\n"
+                 f"例如：http://localhost:5000 admin password123",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -352,12 +348,8 @@ async def setai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=(
-                "用法：/setai &lt;OpenRouter API Key&gt;\n\n"
-                "注册地址：https://openrouter.ai\n"
-                "设置后可使用 /ask 进行智能搜索。"
-            ),
-            parse_mode="HTML",
+            text="请输入 OpenRouter API Key：\n注册地址：https://openrouter.ai",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -390,14 +382,10 @@ async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         current = db.get_setting("ai_model") or "deepseek/deepseek-v3.2"
         await update.message.reply_text(
-            f"当前模型：{current}\n\n"
-            "用法：/setmodel &lt;模型名&gt;\n"
-            "例如：\n"
-            "  /setmodel deepseek/deepseek-v3.2\n"
-            "  /setmodel anthropic/claude-haiku\n"
-            "  /setmodel openai/gpt-4o-mini\n\n"
+            f"请输入模型名称：\n当前：{current}\n"
+            "例如：deepseek/deepseek-v3.2\n"
             "模型列表：https://openrouter.ai/models",
-            parse_mode="HTML",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -411,3 +399,32 @@ async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"AI 模型已切换为：{model}")
     logger.info("AI 模型已切换为: %s", model)
+
+
+# ------------------------------------------------------------------
+# /setsearch — 设置搜索 API Key (Tavily)
+# ------------------------------------------------------------------
+
+@require_owner
+async def setsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setsearch <api_key> — 设置 Tavily API Key 以启用联网搜索。"""
+    await _delete_user_message(update, context)
+
+    db = context.bot_data["db"]
+
+    if not context.args:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="请输入 Tavily API Key：\n注册地址：https://tavily.com",
+            reply_markup=ForceReply(selective=True),
+        )
+        return
+
+    api_key = context.args[0]
+    db.set_setting("search_api_key", api_key)
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="搜索 API Key 已保存！\n/ask 智能搜索现在支持联网获取最新信息。",
+    )
+    logger.info("搜索 API Key 已更新")

@@ -2,7 +2,7 @@
 
 import logging
 
-from telegram import Update
+from telegram import ForceReply, Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_owner
@@ -64,7 +64,8 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "用法：/ban &lt;用户ID&gt;", parse_mode="HTML"
+            "请输入要封禁的用户 ID：",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -102,7 +103,8 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "用法：/unban &lt;用户ID&gt;", parse_mode="HTML"
+            "请输入要解封的用户 ID：",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -154,12 +156,10 @@ async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=(
-                "用法：/setcookie &lt;Cookie值&gt;\n\n"
-                "获取方法：浏览器登录 PT 站 → F12 → Network → "
-                "点击任意请求 → 复制 Cookie 头的值"
-            ),
-            parse_mode="HTML",
+            text="请输入 Cookie：\n"
+                 "获取方法：浏览器登录 PT 站 → F12 → Network → "
+                 "点击任意请求 → 复制 Cookie 头的值",
+            reply_markup=ForceReply(selective=True),
         )
         return
 

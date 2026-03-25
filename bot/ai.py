@@ -66,12 +66,52 @@ class AIClient:
         self.model = model
         self._client = httpx.AsyncClient(timeout=30.0)
 
-    async def parse_intent(self, user_input: str) -> Optional[dict]:
+    async def _web_search(self, query: str, api_key: str) -> str:
+        """调用 Tavily API 搜索，返回摘要文本。"""
+        try:
+            resp = await self._client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "max_results": 5,
+                    "search_depth": "basic",
+                },
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                return ""
+            # 拼接搜索结果摘要
+            summaries = []
+            for r in results[:5]:
+                title = r.get("title", "")
+                content = r.get("content", "")
+                if title and content:
+                    summaries.append(f"- {title}: {content}")
+                elif content:
+                    summaries.append(f"- {content}")
+            return "\n".join(summaries)
+        except Exception:
+            logger.warning("Web search 失败", exc_info=True)
+            return ""
+
+    async def parse_intent(self, user_input: str, search_api_key: str = "") -> Optional[dict]:
         """解析用户自然语言输入，返回结构化意图 dict。失败返回 None。"""
         try:
             # 动态注入当前日期
             today = datetime.date.today().isoformat()
-            system_content = f"当前日期：{today}\n\n{SYSTEM_PROMPT}"
+            system_content = f"当前日期：{today}\n\n"
+
+            # Web search（如果配置了 Tavily key）
+            if search_api_key:
+                search_results = await self._web_search(user_input, search_api_key)
+                if search_results:
+                    system_content += f"以下是相关的网络搜索结果，请参考：\n{search_results}\n\n"
+
+            system_content += SYSTEM_PROMPT
 
             resp = await self._client.post(
                 f"{self.BASE_URL}/chat/completions",

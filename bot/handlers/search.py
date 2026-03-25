@@ -7,7 +7,7 @@ import logging
 import re
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
@@ -203,7 +203,10 @@ def _build_keyboard(user_id: int, page: int, page_size: int, total: int) -> Inli
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /search 和 /s 命令 — 搜索 PT 站种子。"""
     if not context.args:
-        await update.message.reply_text("用法: /search <关键词>")
+        await update.message.reply_text(
+            "请输入搜索关键词：",
+            reply_markup=ForceReply(selective=True),
+        )
         return
 
     keyword = " ".join(context.args)
@@ -534,12 +537,9 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         await update.message.reply_text(
-            "用法：/ask <自然语言描述>\n\n"
-            "例如：\n"
-            "  /ask 权志龙演的电影\n"
-            "  /ask 诺兰导演的科幻片\n"
-            "  /ask 类似盗梦空间的烧脑电影\n"
-            "  /ask 2024年韩国电影"
+            "请描述你想找的影片：\n"
+            "例如：权志龙演的电影、类似盗梦空间的烧脑片",
+            reply_markup=ForceReply(selective=True),
         )
         return
 
@@ -561,7 +561,8 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"正在分析: {user_input} ...")
 
     # Step 1: AI 解析意图
-    intent = await ai_client.parse_intent(user_input)
+    search_api_key = db.get_setting("search_api_key") or ""
+    intent = await ai_client.parse_intent(user_input, search_api_key=search_api_key)
     if not intent:
         await msg.edit_text("AI 分析失败，请尝试换一种表述。")
         return

@@ -80,7 +80,8 @@ class TestSetSiteCommand:
         context = make_context(db=db_with_owner, args=[])
         await setsite_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
+        assert "PT 站地址" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
 
     async def test_invalid_url(self, db_with_owner):
         update = make_update(user_id=111)
@@ -135,7 +136,8 @@ class TestSetPasskeyCommand:
         context.bot.delete_message.assert_called_once()
         # Should show usage
         text = context.bot.send_message.call_args[1].get("text", "") or context.bot.send_message.call_args[0][0] if context.bot.send_message.call_args[0] else context.bot.send_message.call_args[1]["text"]
-        assert "用法" in text
+        assert "Passkey" in text
+        assert context.bot.send_message.call_args[1].get("reply_markup") is not None
 
     async def test_saves_passkey_without_site(self, db_with_owner):
         update = make_update(user_id=111)
@@ -204,7 +206,8 @@ class TestSetDlClientCommands:
         context.bot.delete_message = AsyncMock()
         await setds_command(update, context)
         text = context.bot.send_message.call_args[1].get("text", "")
-        assert "用法" in text
+        assert "Download Station" in text
+        assert context.bot.send_message.call_args[1].get("reply_markup") is not None
 
     async def test_setds_saves_config(self, db_with_owner):
         update = make_update(user_id=111)

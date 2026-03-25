@@ -12,6 +12,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 from telegram.request import HTTPXRequest
 
@@ -39,7 +41,9 @@ from bot.handlers.settings import (
     setsite_command, setpasskey_command, settmdb_command,
     setds_command, setqb_command, settr_command,
     settings_command, setai_command, setmodel_command,
+    setsearch_command,
 )
+from bot.handlers.reply_router import handle_reply
 
 logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
@@ -298,6 +302,7 @@ def main():
     app.add_handler(CommandHandler("ask", ask_command))
     app.add_handler(CommandHandler("setai", setai_command))
     app.add_handler(CommandHandler("setmodel", setmodel_command))
+    app.add_handler(CommandHandler("setsearch", setsearch_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
     app.add_handler(CallbackQueryHandler(ask_select_callback, pattern=r"^ask:"))
@@ -306,6 +311,12 @@ def main():
     app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^cdel:"))
     app.add_handler(CallbackQueryHandler(delete_execute_callback, pattern=r"^delok:"))
     app.add_handler(CallbackQueryHandler(delete_cancel_callback, pattern=r"^delno:"))
+
+    # ForceReply 回复路由（必须在所有 CommandHandler 之后注册）
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.REPLY & ~filters.COMMAND,
+        handle_reply,
+    ))
 
     # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）
     app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)

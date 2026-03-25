@@ -430,7 +430,8 @@ class TestBanCommand:
         context = make_context(db=db_with_users, args=[])
         await ban_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
+        assert "封禁" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
 
     async def test_non_numeric_arg(self, db_with_users):
         update = make_update(user_id=111)
@@ -470,7 +471,8 @@ class TestUnbanCommand:
         context = make_context(db=db_with_users, args=[])
         await unban_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
+        assert "解封" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
 
     async def test_non_numeric_arg(self, db_with_users):
         update = make_update(user_id=111)
@@ -510,7 +512,8 @@ class TestSearchCommand:
         context = make_context(db=db_with_users, args=[])
         await search_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
+        assert "搜索关键词" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
 
     async def test_successful_search(self, db_with_users):
         results = [_make_torrent(i) for i in range(1, 4)]
@@ -778,7 +781,8 @@ class TestSetcookieCommand:
         # Usage message sent
         context.bot.send_message.assert_awaited_once()
         text = context.bot.send_message.call_args[1].get("text") or context.bot.send_message.call_args[0][0] if context.bot.send_message.call_args[0] else context.bot.send_message.call_args[1]["text"]
-        assert "用法" in text or "setcookie" in text
+        assert "Cookie" in text
+        assert context.bot.send_message.call_args[1].get("reply_markup") is not None
 
     async def test_valid_cookie(self, db_with_users):
         pt_client = AsyncMock()
@@ -1453,7 +1457,8 @@ class TestAskCommand:
         context.bot_data["ai_client"] = AsyncMock()
         await ask_command(update, context)
         text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
+        assert "描述" in text or "影片" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
 
     async def test_ai_parse_failure(self, db_with_users):
         """AI returns None -> error message."""
