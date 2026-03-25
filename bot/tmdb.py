@@ -253,17 +253,29 @@ class TMDBClient:
             logger.warning("TMDB discover 失败", exc_info=True)
             return []
 
-    async def lookup_title(self, english_title: str) -> dict:
+    async def lookup_title(self, english_title: str, media_hint: str = "") -> dict:
         """用英文片名查询详细信息（中文名、年份、评分）。
 
-        先搜电影，没结果再搜剧集。返回 rich dict 或仅含英文名的 fallback dict。
+        并行搜索电影和剧集，选 original_title/original_name 与查询精确匹配的结果。
+        都匹配或都不匹配时取 popularity 更高的。
+
+        Args:
+            english_title: 英文原名
+            media_hint: "movie" 或 "tv"，如果已知类型可加速匹配
         """
         fallback = {"title": english_title, "title_cn": "", "year": 0, "rating": 0}
 
-        for endpoint, title_key, cn_key, date_key in [
+        search_configs = [
             ("movie", "original_title", "title", "release_date"),
             ("tv", "original_name", "name", "first_air_date"),
-        ]:
+        ]
+        # 如果有 media_hint，只搜对应类型
+        if media_hint == "movie":
+            search_configs = [search_configs[0]]
+        elif media_hint == "tv":
+            search_configs = [search_configs[1]]
+
+        async def _search_one(endpoint, title_key, cn_key, date_key):
             url = f"{self.BASE_URL}/search/{endpoint}"
             params = {"api_key": self.api_key, "query": english_title, "language": "zh-CN"}
             try:
@@ -272,6 +284,7 @@ class TMDBClient:
                 results = resp.json().get("results", [])
                 if results:
                     top = results[0]
+                    original = top.get(title_key, "")
                     cn_name = top.get(cn_key, "")
                     year = 0
                     date_str = top.get(date_key, "")
@@ -285,17 +298,32 @@ class TMDBClient:
                         "title_cn": cn_name if cn_name != english_title else "",
                         "year": year,
                         "rating": round(top.get("vote_average", 0), 1),
+                        "_original": original,
+                        "_popularity": top.get("popularity", 0),
                     }
             except Exception:
                 logger.warning("TMDB lookup 失败: %s (%s)", english_title, endpoint, exc_info=True)
+            return None
 
-        return fallback
+        # 并行搜索
+        tasks = [_search_one(*cfg) for cfg in search_configs]
+        results = await asyncio.gather(*tasks)
+        candidates = [r for r in results if r is not None]
 
-    async def enrich_titles(self, titles: list[str]) -> list[dict]:
-        """批量查询英文片名的详细信息。并行请求 TMDB。"""
-        import asyncio
-        tasks = [self.lookup_title(t) for t in titles]
-        return list(await asyncio.gather(*tasks))
+        if not candidates:
+            return fallback
+
+        # 选精确匹配的（original_title/name == 查询）
+        exact = [c for c in candidates if c["_original"].lower() == english_title.lower()]
+        if exact:
+            best = max(exact, key=lambda c: c["_popularity"])
+        else:
+            best = max(candidates, key=lambda c: c["_popularity"])
+
+        # 移除内部字段
+        best.pop("_original", None)
+        best.pop("_popularity", None)
+        return best
 
     async def close(self):
         await self._client.aclose()

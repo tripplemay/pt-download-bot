@@ -629,15 +629,19 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not raw_titles:
             await msg.edit_text("AI 未能推荐相关影片，请换一种描述。")
             return
-        # 用 TMDB 补充中文名、年份、评分
-        if tmdb_client:
-            try:
-                await msg.edit_text("正在查询影片信息...")
-            except Exception:
-                pass
-            title_list = await tmdb_client.enrich_titles(raw_titles[:10])
-        else:
-            title_list = [{"title": t, "title_cn": "", "year": 0, "rating": 0} for t in raw_titles]
+        # LLM 直接返回 rich 格式（含 title_cn/year/media）
+        title_list = []
+        for t in raw_titles[:10]:
+            if isinstance(t, dict):
+                title_list.append({
+                    "title": t.get("title", ""),
+                    "title_cn": t.get("title_cn", ""),
+                    "year": t.get("year", 0),
+                    "rating": t.get("rating", 0),
+                })
+            else:
+                # 兼容旧格式（纯字符串列表）
+                title_list.append({"title": str(t), "title_cn": "", "year": 0, "rating": 0})
 
     # MODE_DIRECT: fall through to existing /s search
     if mode == MODE_DIRECT or not title_list:
