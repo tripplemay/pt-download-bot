@@ -14,15 +14,15 @@ Telegram 用户 ──▶ Bot (Docker) ──▶ PT 站搜索
 
 ## 功能特性
 
-- 中英文影片搜索（TMDB 自动翻译 + 渐进式精度搜索）
-- 搜索结果显示做种数（🟢/🔴）、副标题、按做种数排序
-- Inline Keyboard 一键下载，无需手动输入命令
-- 下载进度可视化（进度条 + ETA + 速度）
-- 下载完成自动推送 Telegram 通知
-- 一键推送到 Download Station / qBittorrent / Transmission
-- 多用户支持（Owner 审批制，用户只能查看自己的任务）
-- 智能搜索（Cookie 网页版 + RSS 自动切换，5 分钟缓存防风控）
-- 全部配置可通过 Telegram 对话完成，无需编辑配置文件
+- **智能搜索（AI）** — `/ask` 自然语言搜索，支持按演员/导演/类型/年代查找（OpenRouter + TMDB）
+- **联网搜索** — 配置 Tavily 后 AI 自动搜索网页获取最新影视信息
+- **中英文搜索** — TMDB 自动翻译 + 渐进式精度搜索，电影/剧集并行匹配
+- **搜索结果优化** — 三行显示（片名 + 技术标签 + 副标题/大小/做种数），按做种数排序
+- **Inline Keyboard** — 搜索结果一键下载、翻页，命令菜单快捷访问
+- **下载进度** — 进度条 + ETA + 速度，下载完成自动推送通知
+- **多下载客户端** — Download Station（DSM 6/7 自动适配）/ qBittorrent / Transmission
+- **多用户** — Owner 审批制，用户只能查看自己的任务
+- **对话式配置** — 所有设置通过 Telegram 命令完成，支持 ForceReply 交互，无需编辑配置文件
 
 ## 准备工作
 
@@ -107,6 +107,8 @@ sudo docker compose up -d
 ```
 /setcookie Cookie值     ← 启用网页版搜索，结果更完整
 /settmdb API_Key       ← 启用 TMDB 中文翻译
+/setai API_Key         ← 启用 AI 智能搜索（OpenRouter）
+/setsearch API_Key     ← 启用联网搜索（Tavily）
 ```
 
 配置完成后发送 `/s 星际穿越` 试试搜索。
@@ -118,10 +120,13 @@ sudo docker compose up -d
 | 命令 | 说明 | 示例 |
 |------|------|------|
 | `/s` | 搜索影片（结果带 Inline 下载按钮） | `/s 星际穿越` |
+| `/ask` | AI 智能搜索（自然语言） | `/ask 诺兰导演的科幻片` |
 | `/dl` | 下载指定序号（也可点按钮） | `/dl 3` |
 | `/more` | 下一页（也可点翻页按钮） | `/more` |
 | `/status` | 查看下载进度（用户只看自己的） | `/status` |
 | `/status mine` | Owner 只看自己的任务 | `/status mine` |
+
+> 所有需要参数的命令都支持对话模式：点击菜单命令后，Bot 会提示你输入内容。
 
 **用户管理（管理员）**
 
@@ -137,11 +142,24 @@ sudo docker compose up -d
 |------|------|
 | `/setsite` | 设置 PT 站地址 |
 | `/setpasskey` | 设置 Passkey |
-| `/setcookie` | 设置 Cookie |
-| `/settmdb` | 设置 TMDB API Key |
+| `/setcookie` | 设置 Cookie（启用网页版搜索） |
+| `/settmdb` | 设置 TMDB API Key（中文翻译） |
+| `/setai` | 设置 OpenRouter API Key（AI 智能搜索） |
+| `/setmodel` | 切换 AI 模型（默认 deepseek-v3.2） |
+| `/setsearch` | 设置 Tavily API Key（联网搜索） |
 | `/setds` `/setqb` `/settr` | 设置下载客户端 |
 | `/settings` | 查看所有设置 |
 | `/test` | 测试连接 |
+
+### 智能搜索示例
+
+```
+/ask 权志龙演的电影        → 查 TMDB 人物作品
+/ask 诺兰导演的科幻片      → 查 TMDB 导演作品
+/ask 类似盗梦空间的烧脑片   → AI 推荐 + 联网搜索
+/ask 2024年韩国电影        → AI 推荐
+/ask 最近很火的综艺        → AI 联网搜索最新信息
+```
 
 ### 邀请朋友
 
@@ -159,6 +177,10 @@ sudo docker compose up -d
 **搜索结果少？**
 - 发送 `/setcookie` 配置 Cookie 启用网页版搜索
 - 发送 `/settmdb` 配置 TMDB API Key 提升中文搜索精度
+
+**智能搜索不准？**
+- 发送 `/setsearch` 配置 Tavily API Key 启用联网搜索
+- 用 `/setmodel` 切换模型试试
 
 **下载失败？**
 - Download Station 地址用 `http://localhost:5000`（容器与群晖共享网络）
