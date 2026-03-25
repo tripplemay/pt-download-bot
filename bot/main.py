@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Optional
 
-from telegram import Update
+from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -310,7 +310,37 @@ def main():
     # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）
     app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)
 
-    # 8. 启动轮询
+    # 8. 注册命令菜单
+    async def post_init(application):
+        """启动后设置 Bot 命令菜单。"""
+        # 所有用户可见的命令
+        user_commands = [
+            BotCommand("s", "搜索影片"),
+            BotCommand("ask", "智能搜索（AI）"),
+            BotCommand("more", "下一页"),
+            BotCommand("status", "下载进度"),
+            BotCommand("help", "帮助"),
+            BotCommand("apply", "申请使用权限"),
+        ]
+        await application.bot.set_my_commands(user_commands)
+
+        # Owner 私聊额外看到管理命令
+        owner_commands = user_commands + [
+            BotCommand("users", "查看所有用户"),
+            BotCommand("settings", "查看设置"),
+            BotCommand("test", "测试连接"),
+        ]
+        try:
+            await application.bot.set_my_commands(
+                owner_commands,
+                scope=BotCommandScopeChat(chat_id=owner_id),
+            )
+        except Exception:
+            logger.warning("设置 Owner 命令菜单失败", exc_info=True)
+
+    app.post_init = post_init
+
+    # 9. 启动轮询
     logger.info("Bot 启动中...")
     app.run_polling(allowed_updates=["message", "callback_query"])
 
