@@ -629,13 +629,15 @@ async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not raw_titles:
             await msg.edit_text("AI 未能推荐相关影片，请换一种描述。")
             return
-        # Convert string list to dict list (recommend mode doesn't have TMDB data)
-        title_list = [{"title": t, "title_cn": "", "year": 0, "rating": 0} for t in raw_titles]
-        if reason:
+        # 用 TMDB 补充中文名、年份、评分
+        if tmdb_client:
             try:
-                await msg.edit_text(f"AI 推荐: {reason}")
+                await msg.edit_text("正在查询影片信息...")
             except Exception:
                 pass
+            title_list = await tmdb_client.enrich_titles(raw_titles[:10])
+        else:
+            title_list = [{"title": t, "title_cn": "", "year": 0, "rating": 0} for t in raw_titles]
 
     # MODE_DIRECT: fall through to existing /s search
     if mode == MODE_DIRECT or not title_list:

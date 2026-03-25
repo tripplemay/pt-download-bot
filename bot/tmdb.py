@@ -253,5 +253,49 @@ class TMDBClient:
             logger.warning("TMDB discover 失败", exc_info=True)
             return []
 
+    async def lookup_title(self, english_title: str) -> dict:
+        """用英文片名查询详细信息（中文名、年份、评分）。
+
+        先搜电影，没结果再搜剧集。返回 rich dict 或仅含英文名的 fallback dict。
+        """
+        fallback = {"title": english_title, "title_cn": "", "year": 0, "rating": 0}
+
+        for endpoint, title_key, cn_key, date_key in [
+            ("movie", "original_title", "title", "release_date"),
+            ("tv", "original_name", "name", "first_air_date"),
+        ]:
+            url = f"{self.BASE_URL}/search/{endpoint}"
+            params = {"api_key": self.api_key, "query": english_title, "language": "zh-CN"}
+            try:
+                resp = await self._client.get(url, params=params)
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+                if results:
+                    top = results[0]
+                    cn_name = top.get(cn_key, "")
+                    year = 0
+                    date_str = top.get(date_key, "")
+                    if date_str and len(date_str) >= 4:
+                        try:
+                            year = int(date_str[:4])
+                        except ValueError:
+                            pass
+                    return {
+                        "title": english_title,
+                        "title_cn": cn_name if cn_name != english_title else "",
+                        "year": year,
+                        "rating": round(top.get("vote_average", 0), 1),
+                    }
+            except Exception:
+                logger.warning("TMDB lookup 失败: %s (%s)", english_title, endpoint, exc_info=True)
+
+        return fallback
+
+    async def enrich_titles(self, titles: list[str]) -> list[dict]:
+        """批量查询英文片名的详细信息。并行请求 TMDB。"""
+        import asyncio
+        tasks = [self.lookup_title(t) for t in titles]
+        return list(await asyncio.gather(*tasks))
+
     async def close(self):
         await self._client.aclose()
