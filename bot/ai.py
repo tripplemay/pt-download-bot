@@ -45,11 +45,14 @@ titles 要求：
 
 {"mode": "direct", "keyword": "片名"}
 
+### 如何选择模式
+- 查具体人物（演员/导演）的作品 → tmdb (person_credits)
+- 用户输入本身就是一个片名 → direct
+- 其他所有情况 → recommend（包括：推荐、排行、主观描述、热门、特定类别、时间范围筛选等）
+
 ### 规则
 - 只输出 JSON，不要解释
 - person 字段用用户使用的语言（中文输入就用中文）
-- genre 使用英文：action, comedy, drama, thriller, horror, sci-fi, romance, animation, documentary, crime, fantasy, mystery, adventure, war, history, music, family, western
-- 优先使用 tmdb 模式（数据更准确），只有主观推荐类才用 recommend 模式
 - 注意用户提到的时间范围（"今年"、"最近"、"90年代"等），结合当前日期判断"""
 
 
