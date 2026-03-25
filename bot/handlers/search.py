@@ -75,10 +75,8 @@ async def _search_web_progressive(pt_client, cookie: str, keyword: str, translat
     """
     results: list = []
 
-    # 1) 每个英文翻译 + 标题搜索
+    # 1) 每个英文翻译 + 标题搜索（全部搜完，不提前终止）
     for en_kw in translated_keywords:
-        if len(results) >= _MIN_RESULTS:
-            break
         if results:
             await asyncio.sleep(0.5)
         batch = await pt_client.search_web(en_kw, cookie=cookie, search_area=0)
