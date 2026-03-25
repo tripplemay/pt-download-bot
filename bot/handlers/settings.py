@@ -336,3 +336,78 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("/setds 或 /setqb 或 /settr — 设置下载客户端")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# ------------------------------------------------------------------
+# /setai — 设置 AI API Key (OpenRouter)
+# ------------------------------------------------------------------
+
+@require_owner
+async def setai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setai <api_key> — 设置 OpenRouter API Key 以启用智能搜索。"""
+    await _delete_user_message(update, context)
+
+    db = context.bot_data["db"]
+
+    if not context.args:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                "用法：/setai &lt;OpenRouter API Key&gt;\n\n"
+                "注册地址：https://openrouter.ai\n"
+                "设置后可使用 /ask 进行智能搜索。"
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    api_key = context.args[0]
+    db.set_setting("ai_api_key", api_key)
+
+    # 重新初始化 AI 客户端
+    from bot.ai import AIClient
+    model = db.get_setting("ai_model") or "deepseek/deepseek-v3.2"
+    context.bot_data["ai_client"] = AIClient(api_key, model=model)
+
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="AI API Key 已保存！\n"
+             f"当前模型：{model}\n"
+             "现在可以使用 /ask 进行智能搜索。",
+    )
+    logger.info("AI API Key 已更新")
+
+
+# ------------------------------------------------------------------
+# /setmodel — 切换 AI 模型
+# ------------------------------------------------------------------
+
+@require_owner
+async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setmodel <模型名> — 切换 AI 模型。"""
+    db = context.bot_data["db"]
+
+    if not context.args:
+        current = db.get_setting("ai_model") or "deepseek/deepseek-v3.2"
+        await update.message.reply_text(
+            f"当前模型：{current}\n\n"
+            "用法：/setmodel &lt;模型名&gt;\n"
+            "例如：\n"
+            "  /setmodel deepseek/deepseek-v3.2\n"
+            "  /setmodel anthropic/claude-haiku\n"
+            "  /setmodel openai/gpt-4o-mini\n\n"
+            "模型列表：https://openrouter.ai/models",
+            parse_mode="HTML",
+        )
+        return
+
+    model = context.args[0]
+    db.set_setting("ai_model", model)
+
+    # 更新现有 AI 客户端的模型
+    ai_client = context.bot_data.get("ai_client")
+    if ai_client:
+        ai_client.model = model
+
+    await update.message.reply_text(f"AI 模型已切换为：{model}")
+    logger.info("AI 模型已切换为: %s", model)

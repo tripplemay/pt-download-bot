@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
 from bot.pt.nexusphp import CookieExpiredError
+from bot.ai import AIClient, MODE_TMDB, MODE_RECOMMEND, MODE_DIRECT
 from bot.utils import truncate, parse_title_tags
 
 logger = logging.getLogger(__name__)
@@ -486,3 +487,190 @@ async def dl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=query.message.chat_id,
             text="下载任务添加失败，请稍后重试。",
         )
+
+
+@require_auth
+async def ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /ask 命令 — AI 智能搜索。"""
+    ai_client = context.bot_data.get("ai_client")
+    if not ai_client:
+        await update.message.reply_text(
+            "智能搜索未启用。\n管理员请使用 /setai 配置 OpenRouter API Key。"
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "用法：/ask <自然语言描述>\n\n"
+            "例如：\n"
+            "  /ask 权志龙演的电影\n"
+            "  /ask 诺兰导演的科幻片\n"
+            "  /ask 类似盗梦空间的烧脑电影\n"
+            "  /ask 2024年韩国电影"
+        )
+        return
+
+    user_input = " ".join(context.args)
+    if len(user_input) > 200:
+        await update.message.reply_text("输入过长，请控制在 200 字符以内。")
+        return
+
+    pt_client = context.bot_data.get("pt_client")
+    if not pt_client:
+        await update.message.reply_text(
+            "PT 站尚未配置。\n管理员请先使用 /setsite 和 /setpasskey 完成配置。"
+        )
+        return
+
+    tmdb_client = context.bot_data.get("tmdb_client")
+    db = context.bot_data["db"]
+    page_size = context.bot_data.get("page_size", 10)
+
+    msg = await update.message.reply_text(f"正在分析: {user_input} ...")
+
+    # Step 1: AI 解析意图
+    intent = await ai_client.parse_intent(user_input)
+    if not intent:
+        await msg.edit_text("AI 分析失败，请尝试换一种表述。")
+        return
+
+    mode = intent.get("mode", "direct")
+    logger.info("AI 意图解析: %s → %s", user_input, intent)
+
+    # Step 2: 根据意图获取搜索关键词列表
+    search_titles = []
+
+    if mode == MODE_TMDB and tmdb_client:
+        action = intent.get("action", "")
+
+        if action == "person_credits":
+            person_name = intent.get("person", "")
+            role = intent.get("role", "actor")
+            media = intent.get("media", "all")
+
+            try:
+                await msg.edit_text(f"正在查询 {person_name} 的作品...")
+            except Exception:
+                pass
+
+            person_id = await tmdb_client.search_person(person_name)
+            if person_id:
+                search_titles = await tmdb_client.get_person_credits(person_id, role=role, media=media)
+
+            if not search_titles:
+                await msg.edit_text(f"未找到 {person_name} 的相关作品。")
+                return
+
+        elif action == "discover":
+            media = intent.get("media", "movie")
+            year = intent.get("year")
+            genre = intent.get("genre")
+            region = intent.get("region")
+
+            desc_parts = []
+            if year:
+                desc_parts.append(f"{year}年")
+            if region:
+                desc_parts.append(region)
+            if genre:
+                desc_parts.append(genre)
+            desc = " ".join(desc_parts) or "影视"
+
+            try:
+                await msg.edit_text(f"正在发现 {desc} ...")
+            except Exception:
+                pass
+
+            search_titles = await tmdb_client.discover(
+                media=media, year=year, genre=genre, region=region,
+            )
+
+            if not search_titles:
+                await msg.edit_text(f"未找到匹配的{desc}。")
+                return
+        else:
+            # Unknown TMDB action, fall through to direct
+            mode = MODE_DIRECT
+
+    elif mode == MODE_RECOMMEND:
+        search_titles = intent.get("titles", [])
+        reason = intent.get("reason", "")
+        if reason:
+            try:
+                await msg.edit_text(f"AI 推荐: {reason}\n正在搜索 PT 站...")
+            except Exception:
+                pass
+        if not search_titles:
+            await msg.edit_text("AI 未能推荐相关影片，请换一种描述。")
+            return
+
+    if mode == MODE_DIRECT or not search_titles:
+        # 直接当关键词搜索，复用现有流程
+        keyword = intent.get("keyword", user_input)
+        # Import and call existing search logic
+        # Simulate a /s command by setting context.args and calling search_command
+        context.args = keyword.split()
+        # Delete the "analyzing" message first
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await search_command.__wrapped__(update, context)
+        return
+
+    # Step 3: 用片名列表搜 PT 站
+    try:
+        await msg.edit_text(f"正在搜索 {len(search_titles)} 部影片...")
+    except Exception:
+        pass
+
+    cookie = db.get_setting("pt_cookie")
+    all_results = []
+    searched = 0
+
+    for title in search_titles[:10]:  # Limit to top 10 to avoid too many requests
+        try:
+            if cookie:
+                batch = await pt_client.search_web(title, cookie=cookie, search_area=0)
+            else:
+                batch = await pt_client.search(title)
+            all_results = _merge_results(all_results, batch)
+            searched += 1
+
+            # Progress update every 3 titles
+            if searched % 3 == 0 and searched < len(search_titles[:10]):
+                try:
+                    await msg.edit_text(
+                        f"正在搜索 {len(search_titles)} 部影片... ({searched} 部已完成，找到 {len(all_results)} 条)"
+                    )
+                except Exception:
+                    pass
+        except CookieExpiredError:
+            logger.warning("Cookie 已失效")
+            db.delete_setting("pt_cookie")
+            cookie = None  # Fall back to RSS for remaining
+        except Exception:
+            logger.warning("搜索 '%s' 失败", title, exc_info=True)
+
+        # Rate limiting between requests
+        if searched < len(search_titles[:10]):
+            await asyncio.sleep(0.5)
+
+    # Sort by seeders
+    all_results.sort(key=lambda r: r.seeders, reverse=True)
+
+    user_id = update.effective_user.id
+    if not all_results:
+        await msg.edit_text("在 PT 站上未找到相关资源。")
+        _set_user_cache(user_id, {"results": [], "page": 0, "page_size": page_size})
+        return
+
+    _set_user_cache(user_id, {
+        "results": all_results,
+        "page": 0,
+        "page_size": page_size,
+    })
+
+    text = _format_results(all_results, 0, page_size)
+    keyboard = _build_keyboard(user_id, 0, page_size, len(all_results))
+    await msg.edit_text(text, reply_markup=keyboard)

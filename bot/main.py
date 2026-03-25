@@ -22,7 +22,8 @@ from bot.clients import create_download_client
 from bot.clients.base import DownloadClientBase
 from bot.tmdb import TMDBClient
 from bot.middleware import require_auth, require_owner
-from bot.handlers.search import search_command, more_command, page_callback, dl_callback
+from bot.ai import AIClient
+from bot.handlers.search import search_command, more_command, page_callback, dl_callback, ask_command
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.status import (
@@ -37,7 +38,7 @@ from bot.handlers.notify import check_completed_tasks
 from bot.handlers.settings import (
     setsite_command, setpasskey_command, settmdb_command,
     setds_command, setqb_command, settr_command,
-    settings_command,
+    settings_command, setai_command, setmodel_command,
 )
 
 logging.basicConfig(
@@ -158,6 +159,15 @@ def init_tmdb_client(db: Database) -> Optional[TMDBClient]:
     return None
 
 
+def init_ai_client(db: Database) -> Optional[AIClient]:
+    """从数据库加载 AI 配置。"""
+    api_key = db.get_setting("ai_api_key")
+    if api_key:
+        model = db.get_setting("ai_model") or "deepseek/deepseek-v3.2"
+        return AIClient(api_key, model=model)
+    return None
+
+
 # ------------------------------------------------------------------
 # 内置命令: /test, /status
 # ------------------------------------------------------------------
@@ -235,6 +245,10 @@ def main():
     if tmdb_client:
         logger.info("TMDB 翻译已启用")
 
+    ai_client = init_ai_client(db)
+    if ai_client:
+        logger.info("AI 智能搜索已启用 (模型: %s)", ai_client.model)
+
     page_size = int(os.environ.get("PT_PAGE_SIZE", "10"))
 
     # 5. 构建 Telegram Application（增大超时，适配代理/高延迟网络）
@@ -252,6 +266,7 @@ def main():
     app.bot_data["pt_client"] = pt_client
     app.bot_data["dl_client"] = dl_client
     app.bot_data["tmdb_client"] = tmdb_client
+    app.bot_data["ai_client"] = ai_client
     app.bot_data["owner_id"] = owner_id
     app.bot_data["page_size"] = page_size
 
@@ -280,6 +295,9 @@ def main():
     app.add_handler(CommandHandler("setqb", setqb_command))
     app.add_handler(CommandHandler("settr", settr_command))
     app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("ask", ask_command))
+    app.add_handler(CommandHandler("setai", setai_command))
+    app.add_handler(CommandHandler("setmodel", setmodel_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
     app.add_handler(CallbackQueryHandler(dl_callback, pattern=r"^dl:"))

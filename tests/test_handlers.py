@@ -10,7 +10,7 @@ from bot.handlers.start import start_command, apply_command, approval_callback, 
 from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
 from bot.handlers.search import (
     search_command, more_command, _format_results, user_cache, _search_result_cache,
-    page_callback, dl_callback, _seeders_icon, _build_keyboard,
+    page_callback, dl_callback, _seeders_icon, _build_keyboard, ask_command,
 )
 from bot.handlers.download import download_command
 from bot.pt.base import TorrentResult
@@ -1426,3 +1426,242 @@ class TestSearchCommandCacheAndValidation:
         msg_mock.edit_text.assert_awaited()
         text = msg_mock.edit_text.call_args[0][0]
         assert "Torrent Title 99" in text
+
+
+# ===========================================================================
+# bot/handlers/search.py — ask_command (AI smart search)
+# ===========================================================================
+
+class TestAskCommand:
+
+    async def test_no_ai_client(self, db_with_users):
+        """ai_client not configured -> prompt to set up."""
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users)
+        context.bot_data["ai_client"] = None
+        await ask_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "未启用" in text or "/setai" in text
+
+    async def test_no_args(self, db_with_users):
+        """No arguments -> usage message."""
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=[])
+        context.bot_data["ai_client"] = AsyncMock()
+        await ask_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "用法" in text
+
+    async def test_ai_parse_failure(self, db_with_users):
+        """AI returns None -> error message."""
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value=None)
+        pt_client = AsyncMock()
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["test"])
+        context.bot_data["ai_client"] = ai_client
+
+        await ask_command(update, context)
+        msg_mock.edit_text.assert_awaited()
+        assert "失败" in msg_mock.edit_text.call_args[0][0]
+
+    async def test_direct_mode(self, db_with_users):
+        """AI returns direct mode -> delegates to search_command."""
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={"mode": "direct", "keyword": "Interstellar"})
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=[])
+        pt_client.search_web = AsyncMock(return_value=[])
+
+        msg_mock = AsyncMock()
+        msg_mock.delete = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["test query"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = None
+
+        await ask_command(update, context)
+        # In direct mode it deletes the analyzing msg and calls search_command
+        msg_mock.delete.assert_awaited()
+
+    async def test_recommend_mode(self, db_with_users):
+        """AI returns recommend mode -> searches each title."""
+        results = [TorrentResult(
+            title="Inception.2010.1080p",
+            torrent_url="http://x/download.php?id=1",
+            size="10 GB",
+            seeders=5,
+        )]
+
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={
+            "mode": "recommend",
+            "titles": ["Inception", "Interstellar"],
+            "reason": "经典烧脑科幻",
+        })
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=results)
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["类似盗梦空间"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = None
+
+        await ask_command(update, context)
+        # Should show results via edit_text
+        assert msg_mock.edit_text.await_count >= 1
+
+    async def test_tmdb_person_credits_mode(self, db_with_users):
+        """AI returns tmdb/person_credits mode -> queries TMDB then searches PT."""
+        results = [TorrentResult(
+            title="Movie.A.2024.1080p",
+            torrent_url="http://x/download.php?id=10",
+            size="5 GB",
+            seeders=3,
+        )]
+
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={
+            "mode": "tmdb",
+            "action": "person_credits",
+            "person": "诺兰",
+            "role": "director",
+            "media": "movie",
+        })
+        tmdb_client = AsyncMock()
+        tmdb_client.search_person = AsyncMock(return_value=525)
+        tmdb_client.get_person_credits = AsyncMock(return_value=["Movie A", "Movie B"])
+
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=results)
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["诺兰导演的电影"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = tmdb_client
+
+        await ask_command(update, context)
+        tmdb_client.search_person.assert_awaited_once_with("诺兰")
+        tmdb_client.get_person_credits.assert_awaited_once_with(525, role="director", media="movie")
+        assert msg_mock.edit_text.await_count >= 1
+
+    async def test_tmdb_person_not_found(self, db_with_users):
+        """TMDB person not found -> shows error message."""
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={
+            "mode": "tmdb",
+            "action": "person_credits",
+            "person": "不存在的人",
+            "role": "actor",
+            "media": "movie",
+        })
+        tmdb_client = AsyncMock()
+        tmdb_client.search_person = AsyncMock(return_value=None)
+
+        pt_client = AsyncMock()
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["不存在的人的电影"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = tmdb_client
+
+        await ask_command(update, context)
+        msg_mock.edit_text.assert_awaited()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "未找到" in text
+
+    async def test_tmdb_discover_mode(self, db_with_users):
+        """AI returns tmdb/discover mode -> discovers then searches PT."""
+        results = [TorrentResult(
+            title="Korean.Film.2024.1080p",
+            torrent_url="http://x/download.php?id=20",
+            size="8 GB",
+            seeders=10,
+        )]
+
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={
+            "mode": "tmdb",
+            "action": "discover",
+            "media": "movie",
+            "year": 2024,
+            "genre": "action",
+            "region": "KR",
+        })
+        tmdb_client = AsyncMock()
+        tmdb_client.discover = AsyncMock(return_value=["Korean Film"])
+
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=results)
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["2024韩国动作片"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = tmdb_client
+
+        await ask_command(update, context)
+        tmdb_client.discover.assert_awaited_once_with(
+            media="movie", year=2024, genre="action", region="KR",
+        )
+        assert msg_mock.edit_text.await_count >= 1
+
+    async def test_no_pt_client(self, db_with_users):
+        """PT client not configured -> prompt to set up."""
+        ai_client = AsyncMock()
+
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=["test"])
+        context.bot_data["ai_client"] = ai_client
+        # pt_client not in bot_data
+
+        await ask_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "PT" in text or "配置" in text
+
+    async def test_input_too_long(self, db_with_users):
+        """Input over 200 chars -> rejected."""
+        ai_client = AsyncMock()
+        long_input = ["x" * 201]
+
+        update = make_update(user_id=333)
+        context = make_context(db=db_with_users, args=long_input)
+        context.bot_data["ai_client"] = ai_client
+
+        await ask_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "200" in text or "过长" in text
+
+    async def test_recommend_no_pt_results(self, db_with_users):
+        """Recommend mode but PT has no results -> shows not found."""
+        ai_client = AsyncMock()
+        ai_client.parse_intent = AsyncMock(return_value={
+            "mode": "recommend",
+            "titles": ["Obscure Film"],
+            "reason": "推荐理由",
+        })
+        pt_client = AsyncMock()
+        pt_client.search = AsyncMock(return_value=[])
+
+        msg_mock = AsyncMock()
+        update = make_update(user_id=333)
+        update.message.reply_text = AsyncMock(return_value=msg_mock)
+        context = make_context(db=db_with_users, pt_client=pt_client, args=["推荐"])
+        context.bot_data["ai_client"] = ai_client
+        context.bot_data["tmdb_client"] = None
+
+        await ask_command(update, context)
+        msg_mock.edit_text.assert_awaited()
+        text = msg_mock.edit_text.call_args[0][0]
+        assert "未找到" in text
