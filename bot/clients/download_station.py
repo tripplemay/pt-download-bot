@@ -332,13 +332,46 @@ class DownloadStationClient(DownloadClientBase):
     # 删除任务
     # ------------------------------------------------------------------
 
+    async def _get_task_file_path(self, task_id: str) -> Optional[str]:
+        """查询任务的下载路径，用于 File Station 删除。失败返回 None。"""
+        try:
+            tasks = await self.get_tasks()
+            for t in tasks:
+                if t.get("id") == task_id:
+                    dest = t.get("additional", {}).get("detail", {}).get("destination", "")
+                    title = t.get("title", "")
+                    if dest and title:
+                        return f"{dest}/{title}"
+        except Exception:
+            logger.warning("获取任务路径失败，将仅删除任务不清理文件: %s", task_id)
+        return None
+
+    async def _filestation_delete(self, path: str) -> None:
+        """调用 File Station API 异步删除路径（fire-and-forget，失败只记 warning）。"""
+        try:
+            form_data = {
+                "api": "SYNO.FileStation.Delete",
+                "version": "2",
+                "method": "start",
+                "path": json.dumps([path]),
+                "recursive": "true",
+                "_sid": self.sid,
+            }
+            await self._api_request("POST", data=form_data)
+            logger.info("File Station 文件删除已发起: %s", path)
+        except Exception:
+            logger.warning("File Station 文件删除失败（文件未清理）: %s", path, exc_info=True)
+
     async def delete_task(self, task_id: str, delete_files: bool = True) -> bool:
-        # 注意：Download Station API 不支持通过接口控制是否删除文件，
-        # delete_files 参数在此客户端中被忽略。是否删除文件取决于 DS 面板设置。
         try:
             await self._ensure_login()
             await self._ensure_profile()
             p = self._profile
+
+            # DSM 7 (v2) 通过 File Station API 删文件；v1 不支持
+            file_path = None
+            if delete_files and p.version == 2:
+                file_path = await self._get_task_file_path(task_id)
 
             if p.version == 2:
                 form_data = {
@@ -360,6 +393,11 @@ class DownloadStationClient(DownloadClientBase):
 
             await self._api_request("POST", data=form_data)
             logger.info("DS 删除任务成功: %s", task_id)
+
+            # 任务删除成功后再删文件（fire-and-forget）
+            if file_path:
+                await self._filestation_delete(file_path)
+
             return True
         except Exception:
             # 任务可能已被其他人删除，检查是否还存在

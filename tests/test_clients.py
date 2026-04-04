@@ -113,6 +113,17 @@ def _v1_profile():
     )
 
 
+def _v2_profile():
+    """Create a v2 API profile for testing."""
+    from bot.clients.download_station import _APIProfile
+    return _APIProfile(
+        version=2, list_api="SYNO.DownloadStation2.Task", list_version="2",
+        list_task_key="task", create_api="SYNO.DownloadStation2.Task",
+        create_version="2", create_url_field="url",
+        destination="/volume1/downloads", destination_required=True,
+    )
+
+
 class TestDownloadStationClient:
     @pytest.fixture
     def ds_client(self):
@@ -259,7 +270,7 @@ class TestDownloadStationClient:
 
     # -- delete_task -----------------------------------------------------
 
-    async def test_delete_task_success(self, ds_client):
+    async def test_delete_task_v1_success(self, ds_client):
         ds_client.sid = "sid"
         ds_client._profile = _v1_profile()
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
@@ -269,13 +280,88 @@ class TestDownloadStationClient:
         assert call_data["method"] == "delete"
         assert "task_123" in call_data["id"]
 
-    async def test_delete_task_ignores_delete_files_param(self, ds_client):
-        """DS API 不支持控制删文件，参数应被忽略而不报错。"""
+    async def test_delete_task_v1_skip_filestation(self, ds_client):
+        """v1 不调用 File Station API，即使 delete_files=True。"""
         ds_client.sid = "sid"
         ds_client._profile = _v1_profile()
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        ds_client._filestation_delete = AsyncMock()
+        result = await ds_client.delete_task("task_123", delete_files=True)
+        assert result is True
+        ds_client._filestation_delete.assert_not_awaited()
+
+    async def test_delete_task_v2_calls_filestation(self, ds_client):
+        """v2 且 delete_files=True 时调用 File Station API 删文件。"""
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        ds_client._get_task_file_path = AsyncMock(return_value="/volume1/downloads/Movie")
+        ds_client._filestation_delete = AsyncMock()
+        result = await ds_client.delete_task("task_123", delete_files=True)
+        assert result is True
+        ds_client._filestation_delete.assert_awaited_once_with("/volume1/downloads/Movie")
+
+    async def test_delete_task_v2_skip_filestation_when_false(self, ds_client):
+        """delete_files=False 时不调用 File Station API。"""
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        ds_client._filestation_delete = AsyncMock()
         result = await ds_client.delete_task("task_123", delete_files=False)
         assert result is True
+        ds_client._filestation_delete.assert_not_awaited()
+
+    async def test_delete_task_v2_filestation_failure_still_succeeds(self, ds_client):
+        """File Station 删文件失败不影响任务删除结果。"""
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        ds_client._get_task_file_path = AsyncMock(return_value="/volume1/downloads/Movie")
+        ds_client._filestation_delete = AsyncMock(side_effect=Exception("FileStation error"))
+        result = await ds_client.delete_task("task_123", delete_files=True)
+        assert result is True
+
+    async def test_get_task_file_path_found(self, ds_client):
+        """找到任务时返回正确路径。"""
+        ds_client.get_tasks = AsyncMock(return_value=[{
+            "id": "task_123",
+            "title": "My Movie",
+            "additional": {"detail": {"destination": "/volume1/downloads"}, "transfer": {}},
+        }])
+        path = await ds_client._get_task_file_path("task_123")
+        assert path == "/volume1/downloads/My Movie"
+
+    async def test_get_task_file_path_not_found(self, ds_client):
+        """任务不存在时返回 None。"""
+        ds_client.get_tasks = AsyncMock(return_value=[])
+        path = await ds_client._get_task_file_path("task_999")
+        assert path is None
+
+    async def test_get_task_file_path_missing_dest(self, ds_client):
+        """destination 为空时返回 None。"""
+        ds_client.get_tasks = AsyncMock(return_value=[{
+            "id": "task_123",
+            "title": "My Movie",
+            "additional": {"detail": {"destination": ""}, "transfer": {}},
+        }])
+        path = await ds_client._get_task_file_path("task_123")
+        assert path is None
+
+    async def test_filestation_delete_calls_api(self, ds_client):
+        """_filestation_delete 调用正确的 API。"""
+        ds_client.sid = "sid"
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        await ds_client._filestation_delete("/volume1/downloads/Movie")
+        call_data = ds_client._api_request.call_args[1]["data"]
+        assert call_data["api"] == "SYNO.FileStation.Delete"
+        assert call_data["method"] == "start"
+        assert "/volume1/downloads/Movie" in call_data["path"]
+
+    async def test_filestation_delete_failure_silent(self, ds_client):
+        """_filestation_delete 失败时不抛异常。"""
+        ds_client.sid = "sid"
+        ds_client._api_request = AsyncMock(side_effect=Exception("network error"))
+        await ds_client._filestation_delete("/volume1/downloads/Movie")  # 不应抛出
 
     # -- close -----------------------------------------------------------
 
