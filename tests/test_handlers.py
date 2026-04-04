@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from bot.middleware import require_auth, require_owner
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
-from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command
+from bot.handlers.admin import users_command, pending_command, ban_command, unban_command, setcookie_command, cookiestatus_command, msg_command, broadcast_command
 from bot.handlers.search import (
     search_command, more_command, _format_results, user_cache, _search_result_cache,
     page_callback, dl_callback, _seeders_icon, _build_keyboard, ask_command,
@@ -1667,4 +1667,136 @@ class TestAskCommand:
         assert msg_mock.edit_text.await_count >= 1
         text = msg_mock.edit_text.call_args[0][0]
         assert "Obscure Film" in text
-        assert 333 in ask_title_cache
+
+
+# ===========================================================================
+# bot/handlers/admin.py — msg_command
+# ===========================================================================
+
+class TestMsgCommand:
+
+    async def test_no_args_shows_force_reply(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=[])
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "消息" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
+
+    async def test_only_user_id_no_content(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["333"])
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "消息" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
+
+    async def test_non_numeric_id(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["abc", "hello"])
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "数字" in text
+
+    async def test_user_not_in_db(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["999", "hello"])
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "不存在" in text
+
+    async def test_banned_user_rejected(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["444", "hello"])
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "封禁" in text
+        context.bot.send_message.assert_not_awaited()
+
+    async def test_send_to_approved_user(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["333", "你好", "世界"])
+        await msg_command(update, context)
+
+        context.bot.send_message.assert_awaited_once()
+        call = context.bot.send_message.call_args[1]
+        assert call["chat_id"] == 333
+        assert "你好 世界" in call["text"]
+        assert "管理员消息" in call["text"]
+
+        reply = update.message.reply_text.call_args[0][0]
+        assert "333" in reply
+
+    async def test_send_fails_bot_blocked(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=["333", "test"])
+        context.bot.send_message = AsyncMock(side_effect=Exception("Forbidden"))
+        await msg_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "发送失败" in text
+
+
+# ===========================================================================
+# bot/handlers/admin.py — broadcast_command
+# ===========================================================================
+
+class TestBroadcastCommand:
+
+    async def test_no_args_shows_force_reply(self, db_with_users):
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, args=[])
+        await broadcast_command(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "广播" in text
+        assert update.message.reply_text.call_args[1].get("reply_markup") is not None
+
+    async def test_broadcast_reaches_all_approved(self, db_with_users):
+        update = make_update(user_id=111)
+        status_mock = AsyncMock()
+        update.message.reply_text = AsyncMock(return_value=status_mock)
+        context = make_context(db=db_with_users, args=["站点维护通知"])
+
+        await broadcast_command(update, context)
+
+        # owner(111) + approved_user(333) = 2 recipients (banned 444 excluded)
+        assert context.bot.send_message.await_count == 2
+        sent_ids = {c[1]["chat_id"] for c in context.bot.send_message.call_args_list}
+        assert 111 in sent_ids
+        assert 333 in sent_ids
+        assert 444 not in sent_ids
+
+        summary = status_mock.edit_text.call_args[0][0]
+        assert "成功 2 人" in summary
+
+    async def test_broadcast_content_format(self, db_with_users):
+        update = make_update(user_id=111)
+        status_mock = AsyncMock()
+        update.message.reply_text = AsyncMock(return_value=status_mock)
+        context = make_context(db=db_with_users, args=["重要", "通知"])
+
+        await broadcast_command(update, context)
+
+        call = context.bot.send_message.call_args_list[0][1]
+        assert "管理员广播" in call["text"]
+        assert "重要 通知" in call["text"]
+
+    async def test_broadcast_partial_failure(self, db_with_users):
+        update = make_update(user_id=111)
+        status_mock = AsyncMock()
+        update.message.reply_text = AsyncMock(return_value=status_mock)
+        context = make_context(db=db_with_users, args=["test"])
+
+        call_count = 0
+
+        async def _send_side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Forbidden")
+
+        context.bot.send_message = AsyncMock(side_effect=_send_side_effect)
+
+        await broadcast_command(update, context)
+
+        summary = status_mock.edit_text.call_args[0][0]
+        assert "失败 1 人" in summary

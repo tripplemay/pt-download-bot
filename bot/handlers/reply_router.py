@@ -24,6 +24,8 @@ _REPLY_PROMPTS = {
     "请输入 Transmission 连接信息": "settr",
     "请输入要封禁的用户 ID": "ban",
     "请输入要解封的用户 ID": "unban",
+    "请输入消息内容（格式：用户ID 消息）": "msg",
+    "请输入广播消息内容": "broadcast",
 }
 
 
@@ -69,7 +71,7 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         setds_command, setqb_command, settr_command,
         setai_command, setmodel_command, setsearch_command,
     )
-    from bot.handlers.admin import ban_command, unban_command, setcookie_command
+    from bot.handlers.admin import ban_command, unban_command, setcookie_command, msg_command, broadcast_command
 
     handlers = {
         "s": search_command,
@@ -86,6 +88,8 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "settr": settr_command,
         "ban": ban_command,
         "unban": unban_command,
+        "msg": msg_command,
+        "broadcast": broadcast_command,
     }
 
     handler_func = handlers.get(matched_command)

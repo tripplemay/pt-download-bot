@@ -204,6 +204,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "/pending — 查看待审批用户\n"
             + "/ban &lt;用户ID&gt; — 封禁用户\n"
             + "/unban &lt;用户ID&gt; — 解封用户\n"
+            + "/msg &lt;用户ID&gt; &lt;内容&gt; — 给用户发消息\n"
+            + "/broadcast &lt;内容&gt; — 广播给所有用户\n"
             + "/test — 测试连接\n"
             + "\n<b>设置命令</b>\n\n"
             + "/setsite — 设置 PT 站地址\n"

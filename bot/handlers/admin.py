@@ -1,5 +1,6 @@
-"""管理员命令：/users, /pending, /ban, /unban"""
+"""管理员命令：/users, /pending, /ban, /unban, /msg, /broadcast"""
 
+import asyncio
 import logging
 
 from telegram import ForceReply, Update
@@ -198,6 +199,98 @@ async def setcookie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         logger.exception("Cookie 验证异常")
         await msg.edit_text("Cookie 验证时出错，请稍后重试。")
+
+
+@require_owner
+async def msg_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/msg <用户ID> <消息内容> — 给指定用户发送消息。"""
+    db = context.bot_data["db"]
+
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "请输入消息内容（格式：用户ID 消息）：",
+            reply_markup=ForceReply(selective=True),
+        )
+        return
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("用户 ID 必须是数字。")
+        return
+
+    target_user = db.get_user(target_id)
+    if target_user is None:
+        await update.message.reply_text(
+            f"用户 <code>{target_id}</code> 不存在于数据库。", parse_mode="HTML"
+        )
+        return
+
+    if target_user.role == "banned":
+        await update.message.reply_text(
+            f"用户 <code>{target_id}</code> 已被封禁，无法接收消息。", parse_mode="HTML"
+        )
+        return
+
+    content = " ".join(context.args[1:])
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"📢 <b>管理员消息</b>\n\n{content}",
+            parse_mode="HTML",
+        )
+        display = target_user.display_name or str(target_id)
+        await update.message.reply_text(
+            f"消息已发送给 {display}（<code>{target_id}</code>）。", parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"发送失败：{e}\n（用户可能已屏蔽 Bot）"
+        )
+
+
+@require_owner
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcast <消息内容> — 向所有已授权用户发送广播。"""
+    db = context.bot_data["db"]
+
+    if not context.args:
+        await update.message.reply_text(
+            "请输入广播消息内容：",
+            reply_markup=ForceReply(selective=True),
+        )
+        return
+
+    content = " ".join(context.args)
+    recipients = db.get_approved_users()
+
+    if not recipients:
+        await update.message.reply_text("没有已授权的用户。")
+        return
+
+    status_msg = await update.message.reply_text(
+        f"正在发送广播给 {len(recipients)} 位用户..."
+    )
+
+    async def _send(user):
+        try:
+            await context.bot.send_message(
+                chat_id=user.telegram_id,
+                text=f"📢 <b>管理员广播</b>\n\n{content}",
+                parse_mode="HTML",
+            )
+            return True
+        except Exception:
+            return False
+
+    results = await asyncio.gather(*[_send(u) for u in recipients])
+    success = sum(results)
+    failed = len(results) - success
+
+    summary = f"广播完成：成功 {success} 人"
+    if failed:
+        summary += f"，失败 {failed} 人（用户可能已屏蔽 Bot）"
+    await status_msg.edit_text(summary)
 
 
 @require_owner

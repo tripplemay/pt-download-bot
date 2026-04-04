@@ -35,6 +35,7 @@ from bot.handlers.status import (
 from bot.handlers.admin import (
     users_command, pending_command, ban_command, unban_command,
     setcookie_command, cookiestatus_command,
+    msg_command, broadcast_command,
 )
 from bot.handlers.notify import check_completed_tasks
 from bot.handlers.settings import (
@@ -291,6 +292,8 @@ def main():
     app.add_handler(CommandHandler("unban", unban_command))
     app.add_handler(CommandHandler("setcookie", setcookie_command))
     app.add_handler(CommandHandler("cookiestatus", cookiestatus_command))
+    app.add_handler(CommandHandler("msg", msg_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
     # 新增设置命令
     app.add_handler(CommandHandler("setsite", setsite_command))
     app.add_handler(CommandHandler("setpasskey", setpasskey_command))
