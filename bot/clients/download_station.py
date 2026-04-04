@@ -332,7 +332,9 @@ class DownloadStationClient(DownloadClientBase):
     # 删除任务
     # ------------------------------------------------------------------
 
-    async def delete_task(self, task_id: str) -> bool:
+    async def delete_task(self, task_id: str, delete_files: bool = True) -> bool:
+        # 注意：Download Station API 不支持通过接口控制是否删除文件，
+        # delete_files 参数在此客户端中被忽略。是否删除文件取决于 DS 面板设置。
         try:
             await self._ensure_login()
             await self._ensure_profile()

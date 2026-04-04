@@ -273,12 +273,12 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("确认移除", callback_data=f"delok:{user_id}:{task_id}"),
+            InlineKeyboardButton("🗑 删除任务+文件", callback_data=f"delok:{user_id}:{task_id}"),
             InlineKeyboardButton("取消", callback_data=f"delno:{user_id}"),
         ]
     ])
     await update.message.reply_text(
-        f"确认移除任务？\n\n{name}",
+        f"🗑 确认删除任务并清理文件？\n\n{name}",
         reply_markup=keyboard,
     )
 
@@ -326,12 +326,12 @@ async def delete_confirm_callback(update: Update, context: ContextTypes.DEFAULT_
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("确认移除", callback_data=f"delok:{user_id}:{task_id}"),
+            InlineKeyboardButton("🗑 删除任务+文件", callback_data=f"delok:{user_id}:{task_id}"),
             InlineKeyboardButton("取消", callback_data=f"delno:{user_id}"),
         ]
     ])
     await query.edit_message_text(
-        f"确认移除任务？\n\n{name}",
+        f"🗑 确认删除任务并清理文件？\n\n{name}",
         reply_markup=keyboard,
     )
 

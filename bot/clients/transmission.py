@@ -101,12 +101,12 @@ class TransmissionClient(DownloadClientBase):
         torrents = data.get("arguments", {}).get("torrents", [])
         return [{"name": t.get("name", ""), **t} for t in torrents]
 
-    async def delete_task(self, task_id: str) -> bool:
-        """删除任务（仅移除，不删文件）。task_id 为 torrent ID。"""
+    async def delete_task(self, task_id: str, delete_files: bool = True) -> bool:
+        """删除任务。delete_files=True 时同时删除本地文件。task_id 为 torrent ID。"""
         try:
             await self._rpc_request(
                 "torrent-remove",
-                {"ids": [int(task_id)], "delete-local-data": False},
+                {"ids": [int(task_id)], "delete-local-data": delete_files},
             )
             logger.info("Transmission 删除任务成功: %s", task_id)
             return True

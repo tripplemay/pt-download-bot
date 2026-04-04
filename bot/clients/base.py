@@ -31,8 +31,8 @@ class DownloadClientBase(ABC):
         ...
 
     @abstractmethod
-    async def delete_task(self, task_id: str) -> bool:
-        """删除指定任务（仅移除任务，不删文件），返回是否成功"""
+    async def delete_task(self, task_id: str, delete_files: bool = True) -> bool:
+        """删除指定任务，返回是否成功。delete_files=True 时同时删除本地文件。"""
         ...
 
     @abstractmethod

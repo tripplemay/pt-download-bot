@@ -341,7 +341,7 @@ class TestCancelCommand:
 
         call_kwargs = update.message.reply_text.call_args
         text = call_kwargs[0][0]
-        assert "确认移除" in text
+        assert "确认删除" in text
         assert "My Movie" in text
         # Check keyboard has confirm and cancel buttons
         markup = call_kwargs[1]["reply_markup"]
@@ -402,7 +402,7 @@ class TestDeleteConfirmCallback:
         query = update.callback_query
         query.edit_message_text.assert_called_once()
         call_args = query.edit_message_text.call_args
-        assert "确认移除" in call_args[0][0]
+        assert "确认删除" in call_args[0][0]
         assert "Movie ABC" in call_args[0][0]
 
     async def test_unauthorized_user(self, db_with_users):

@@ -257,6 +257,26 @@ class TestDownloadStationClient:
         assert ds_client.sid == "new_sid"
         assert ds_client.client.request.await_count == 2
 
+    # -- delete_task -----------------------------------------------------
+
+    async def test_delete_task_success(self, ds_client):
+        ds_client.sid = "sid"
+        ds_client._profile = _v1_profile()
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        result = await ds_client.delete_task("task_123")
+        assert result is True
+        call_data = ds_client._api_request.call_args[1]["data"]
+        assert call_data["method"] == "delete"
+        assert "task_123" in call_data["id"]
+
+    async def test_delete_task_ignores_delete_files_param(self, ds_client):
+        """DS API 不支持控制删文件，参数应被忽略而不报错。"""
+        ds_client.sid = "sid"
+        ds_client._profile = _v1_profile()
+        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
+        result = await ds_client.delete_task("task_123", delete_files=False)
+        assert result is True
+
     # -- close -----------------------------------------------------------
 
     async def test_close(self, ds_client):
@@ -386,6 +406,27 @@ class TestQBittorrentClient:
         )
         result = await qb_client.test_connection()
         assert result is False
+
+    # -- delete_task -----------------------------------------------------
+
+    async def test_delete_task_deletes_files_by_default(self, qb_client):
+        qb_client._request_with_retry = AsyncMock(
+            return_value=_httpx_response(json_data={})
+        )
+        result = await qb_client.delete_task("abc123hash")
+        assert result is True
+        call_data = qb_client._request_with_retry.call_args[1]["data"]
+        assert call_data["hashes"] == "abc123hash"
+        assert call_data["deleteFiles"] == "true"
+
+    async def test_delete_task_keep_files(self, qb_client):
+        qb_client._request_with_retry = AsyncMock(
+            return_value=_httpx_response(json_data={})
+        )
+        result = await qb_client.delete_task("abc123hash", delete_files=False)
+        assert result is True
+        call_data = qb_client._request_with_retry.call_args[1]["data"]
+        assert call_data["deleteFiles"] == "false"
 
 
 # ===================================================================
@@ -560,6 +601,27 @@ class TestTransmissionClient:
         )
         result = await tr_client.test_connection()
         assert result is False
+
+    # -- delete_task -----------------------------------------------------
+
+    async def test_delete_task_deletes_files_by_default(self, tr_client):
+        tr_client._rpc_request = AsyncMock(
+            return_value={"result": "success", "arguments": {}}
+        )
+        result = await tr_client.delete_task("42")
+        assert result is True
+        call_args = tr_client._rpc_request.call_args[0]
+        assert call_args[0] == "torrent-remove"
+        assert call_args[1]["delete-local-data"] is True
+
+    async def test_delete_task_keep_files(self, tr_client):
+        tr_client._rpc_request = AsyncMock(
+            return_value={"result": "success", "arguments": {}}
+        )
+        result = await tr_client.delete_task("42", delete_files=False)
+        assert result is True
+        call_args = tr_client._rpc_request.call_args[0]
+        assert call_args[1]["delete-local-data"] is False
 
     # -- close -----------------------------------------------------------
 

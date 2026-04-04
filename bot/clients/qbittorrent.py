@@ -93,12 +93,12 @@ class QBittorrentClient(DownloadClientBase):
         torrents = resp.json()
         return [{"name": t.get("name", ""), **t} for t in torrents]
 
-    async def delete_task(self, task_id: str) -> bool:
-        """删除任务（仅移除，不删文件）。task_id 为 torrent hash。"""
+    async def delete_task(self, task_id: str, delete_files: bool = True) -> bool:
+        """删除任务。delete_files=True 时同时删除本地文件。task_id 为 torrent hash。"""
         try:
             api_url = f"{self.host}/api/v2/torrents/delete"
             await self._request_with_retry(
-                "POST", api_url, data={"hashes": task_id, "deleteFiles": "false"}
+                "POST", api_url, data={"hashes": task_id, "deleteFiles": "true" if delete_files else "false"}
             )
             logger.info("qBittorrent 删除任务成功: %s", task_id)
             return True
