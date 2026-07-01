@@ -196,6 +196,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             base_commands
             + "/s 关键词 — 搜索种子\n"
             + "/dl 序号 — 下载\n"
+            + "直接发送 magnet/http 链接或 .torrent 文件 — 站外下载\n"
             + "/more — 下一页\n"
             + "/status — 查看下载任务\n"
             + "/cancel 序号 — 移除任务\n"
@@ -222,6 +223,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             base_commands
             + "/s 关键词 — 搜索种子\n"
             + "/dl 序号 — 下载\n"
+            + "直接发送 magnet/http 链接或 .torrent 文件 — 站外下载\n"
             + "/more — 下一页\n"
             + "/status — 查看下载任务\n"
             + "/cancel 序号 — 移除任务\n"

@@ -38,6 +38,7 @@ from bot.handlers.admin import (
     msg_command, broadcast_command,
 )
 from bot.handlers.notify import check_completed_tasks
+from bot.handlers.external import external_url_message, external_torrent_file_message
 from bot.handlers.settings import (
     setsite_command, setpasskey_command, settmdb_command,
     setds_command, setqb_command, settr_command,
@@ -319,6 +320,17 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & filters.REPLY & ~filters.COMMAND,
         handle_reply,
+    ))
+    app.add_handler(MessageHandler(
+        filters.Document.FileExtension("torrent")
+        | filters.Document.MimeType("application/x-bittorrent"),
+        external_torrent_file_message,
+    ))
+    app.add_handler(MessageHandler(
+        filters.TEXT
+        & ~filters.COMMAND
+        & filters.Regex(r"(?i)^\s*(magnet:\?|https?://)\S+\s*$"),
+        external_url_message,
     ))
 
     # 7. 注册完成通知轮询（60 秒一次，启动后 10 秒开始）

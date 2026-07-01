@@ -122,6 +122,7 @@ sudo docker compose up -d
 | `/s` | 搜索影片（结果带 Inline 下载按钮） | `/s 星际穿越` |
 | `/ask` | AI 智能搜索（自然语言） | `/ask 诺兰导演的科幻片` |
 | `/dl` | 下载指定序号（也可点按钮） | `/dl 3` |
+| 直接发送链接/文件 | 下载站外资源（magnet、http(s)、`.torrent`） | `magnet:?xt=...` |
 | `/more` | 下一页（也可点翻页按钮） | `/more` |
 | `/status` | 查看下载进度（用户只看自己的） | `/status` |
 | `/status mine` | Owner 只看自己的任务 | `/status mine` |
