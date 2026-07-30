@@ -11,6 +11,7 @@ from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Upd
 from telegram.ext import ContextTypes
 
 from bot.middleware import require_auth
+from bot.handlers.download_utils import add_pt_torrent_file
 from bot.pt.nexusphp import CookieExpiredError
 from bot.ai import AIClient, MODE_TMDB, MODE_RECOMMEND, MODE_DIRECT
 from bot.utils import truncate, parse_title_tags
@@ -453,21 +454,18 @@ async def dl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=f"正在添加下载: {selected.title[:60]} ...",
     )
 
-    # 先 URL 方式，失败再文件方式
+    # 先由 Bot 完成 PT 鉴权并取得种子，避免下载客户端被重定向到 login.php。
     task_id = None
-    try:
-        task_id = await dl_client.add_torrent_url(selected.torrent_url)
-    except Exception:
-        logger.warning("URL 方式添加失败，尝试文件方式")
-
-    if task_id is None and pt_client:
+    if pt_client:
         try:
-            torrent_bytes = await pt_client.download_torrent(selected.torrent_url)
-            task_id = await dl_client.add_torrent_file(
-                torrent_bytes, f"{selected.title[:80]}.torrent"
+            task_id = await add_pt_torrent_file(
+                pt_client,
+                dl_client,
+                selected,
+                cookie=db.get_setting("pt_cookie") or "",
             )
         except Exception:
-            logger.exception("文件方式也失败")
+            logger.exception("下载或上传 PT 种子文件失败")
 
     if task_id is not None:
         try:

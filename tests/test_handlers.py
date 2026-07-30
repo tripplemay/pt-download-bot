@@ -685,10 +685,11 @@ class TestDownloadCommand:
         text = update.message.reply_text.call_args[0][0]
         assert "超出范围" in text
 
-    async def test_url_download_success(self, db_with_users, search_cache):
+    async def test_file_download_success(self, db_with_users, search_cache):
         pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value="dbid_100")
+        dl_client.add_torrent_file = AsyncMock(return_value="dbid_100")
 
         update = make_update(user_id=333, full_name="Approved User")
         context = make_context(
@@ -703,12 +704,13 @@ class TestDownloadCommand:
         # Owner notified (user 333 != owner 111)
         context.bot.send_message.assert_awaited_once()
         assert context.bot.send_message.call_args[1]["chat_id"] == 111
+        dl_client.add_torrent_url.assert_not_awaited()
 
-    async def test_url_fails_file_succeeds(self, db_with_users, search_cache):
+    async def test_download_uses_configured_cookie(self, db_with_users, search_cache):
+        db_with_users.set_setting("pt_cookie", "uid=1; pass=abc")
         pt_client = AsyncMock()
-        pt_client.download_torrent = AsyncMock(return_value=b"torrent data")
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=None)
         dl_client.add_torrent_file = AsyncMock(return_value="dbid_101")
 
         update = make_update(user_id=333)
@@ -720,12 +722,16 @@ class TestDownloadCommand:
         texts = [c[0][0] for c in update.message.reply_text.call_args_list]
         assert any("成功" in t for t in texts)
         dl_client.add_torrent_file.assert_awaited_once()
+        pt_client.download_torrent.assert_awaited_once_with(
+            search_cache[0].torrent_url,
+            cookie="uid=1; pass=abc",
+        )
+        dl_client.add_torrent_url.assert_not_awaited()
 
-    async def test_both_fail(self, db_with_users, search_cache):
+    async def test_file_download_fails(self, db_with_users, search_cache):
         pt_client = AsyncMock()
         pt_client.download_torrent = AsyncMock(side_effect=Exception("fail"))
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=None)
 
         update = make_update(user_id=333)
         context = make_context(
@@ -741,8 +747,9 @@ class TestDownloadCommand:
         user_cache[111] = user_cache.pop(333)
 
         pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value="dbid_102")
+        dl_client.add_torrent_file = AsyncMock(return_value="dbid_102")
 
         update = make_update(user_id=111)
         context = make_context(
@@ -1225,10 +1232,11 @@ class TestDlCallback:
         return results
 
     async def test_valid_download_success(self, db_with_users, dl_search_cache):
-        """Successful download via URL method."""
+        """Successful download via file upload method."""
         pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+        dl_client.add_torrent_file = AsyncMock(return_value="task_1")
 
         update = self._make_dl_update(333, "dl:333:1")
         context = make_context(
@@ -1240,13 +1248,13 @@ class TestDlCallback:
         texts = [c[1]["text"] for c in send_calls]
         assert any("正在" in t or "添加下载" in t for t in texts)
         assert any("成功" in t for t in texts)
+        dl_client.add_torrent_url.assert_not_awaited()
 
     async def test_valid_download_failure(self, db_with_users, dl_search_cache):
-        """Both URL and file methods fail."""
+        """Downloading the torrent file fails."""
         pt_client = AsyncMock()
         pt_client.download_torrent = AsyncMock(side_effect=Exception("fail"))
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value=None)
 
         update = self._make_dl_update(333, "dl:333:1")
         context = make_context(
@@ -1329,11 +1337,13 @@ class TestDlCallback:
         user_cache[111] = {"results": results, "page": 0, "page_size": 10}
 
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+        dl_client.add_torrent_file = AsyncMock(return_value="task_1")
+        pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
 
         update = self._make_dl_update(111, "dl:111:1")
         context = make_context(
-            db=db_with_users, pt_client=AsyncMock(), dl_client=dl_client, owner_id=111
+            db=db_with_users, pt_client=pt_client, dl_client=dl_client, owner_id=111
         )
         await dl_callback(update, context)
 
@@ -1348,11 +1358,13 @@ class TestDlCallback:
     async def test_non_owner_triggers_notification(self, db_with_users, dl_search_cache):
         """Non-owner download triggers notification to owner."""
         dl_client = AsyncMock()
-        dl_client.add_torrent_url = AsyncMock(return_value="task_1")
+        dl_client.add_torrent_file = AsyncMock(return_value="task_1")
+        pt_client = AsyncMock()
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
 
         update = self._make_dl_update(333, "dl:333:1", full_name="Approved User")
         context = make_context(
-            db=db_with_users, pt_client=AsyncMock(), dl_client=dl_client, owner_id=111
+            db=db_with_users, pt_client=pt_client, dl_client=dl_client, owner_id=111
         )
         await dl_callback(update, context)
 

@@ -1,6 +1,8 @@
 """Comprehensive tests for download client modules."""
 
+import asyncio
 import base64
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -11,6 +13,12 @@ from bot.clients import (
     QBittorrentClient,
     TransmissionClient,
     create_download_client,
+)
+from bot.clients.download_station import (
+    DS7FileManifest,
+    DownloadStationAPIError,
+    _map_file_station_destination,
+    build_ds7_file_manifest,
 )
 
 
@@ -156,6 +164,80 @@ class TestDownloadStationClient:
         with pytest.raises(ConnectionError, match="登录失败"):
             await ds_client._login()
 
+    async def test_file_station_request_uses_independent_session(self, ds_client):
+        ds_client.sid = "download-station-sid"
+        ds_client.client.get = AsyncMock(return_value=_httpx_response(
+            json_data={"success": True, "data": {"sid": "file-station-sid"}},
+        ))
+        ds_client.client.request = AsyncMock(return_value=_httpx_response(
+            json_data={"success": True, "data": {}},
+        ))
+
+        await ds_client._file_station_request(
+            "GET", params={"api": "SYNO.FileStation.List"},
+        )
+
+        assert ds_client.sid == "download-station-sid"
+        assert ds_client._file_station_sid == "file-station-sid"
+        assert ds_client.client.get.await_args.kwargs["params"]["session"] == "FileStation"
+        assert ds_client.client.request.await_args.kwargs["params"]["_sid"] == "file-station-sid"
+
+    async def test_login_and_profile_initialization_are_singleflight(self, ds_client):
+        async def login_once():
+            await asyncio.sleep(0)
+            ds_client.sid = "single-sid"
+
+        ds_client._login = AsyncMock(side_effect=login_once)
+        await asyncio.gather(*[ds_client._ensure_login() for _ in range(4)])
+        assert ds_client._login.await_count == 1
+
+        async def probe_once():
+            await asyncio.sleep(0)
+            return _v2_profile()
+
+        ds_client._run_api_probe = AsyncMock(side_effect=probe_once)
+        await asyncio.gather(*[ds_client._ensure_profile() for _ in range(4)])
+        assert ds_client._run_api_probe.await_count == 1
+
+    async def test_is_ds7_reuses_discovered_profile(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._run_api_probe = AsyncMock(return_value=_v2_profile())
+
+        assert await ds_client.is_ds7() is True
+        assert await ds_client.is_ds7() is True
+
+        ds_client._run_api_probe.assert_awaited_once_with()
+
+    async def test_is_ds7_returns_false_for_dsm6_profile(self, ds_client):
+        ds_client._profile = _v1_profile()
+        ds_client._run_api_probe = AsyncMock()
+
+        assert await ds_client.is_ds7() is False
+
+        ds_client._run_api_probe.assert_not_awaited()
+
+    async def test_is_ds7_propagates_profile_probe_failure(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._run_api_probe = AsyncMock(
+            side_effect=ConnectionError("probe failed")
+        )
+
+        with pytest.raises(ConnectionError, match="probe failed"):
+            await ds_client.is_ds7()
+
+        assert ds_client._profile is None
+
+    async def test_file_station_login_is_singleflight(self, ds_client):
+        async def login_once():
+            await asyncio.sleep(0)
+            ds_client._file_station_sid = "file-sid"
+
+        ds_client._login_file_station = AsyncMock(side_effect=login_once)
+        await asyncio.gather(*[
+            ds_client._ensure_file_station_login() for _ in range(4)
+        ])
+        assert ds_client._login_file_station.await_count == 1
+
     # -- add_torrent_url -------------------------------------------------
 
     async def test_add_torrent_url_success(self, ds_client):
@@ -193,6 +275,44 @@ class TestDownloadStationClient:
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
         assert result is None
 
+    async def test_concurrent_file_upload_auth_refresh_is_singleflight(self, ds_client):
+        ds_client.sid = "expired_sid"
+        ds_client._profile = _v2_profile()
+        expired_requests = 0
+        both_expired = asyncio.Event()
+
+        async def post_with_expired_sid(*args, data, **kwargs):
+            nonlocal expired_requests
+            request_sid = data["_sid"]
+            if request_sid == "expired_sid":
+                expired_requests += 1
+                if expired_requests == 2:
+                    both_expired.set()
+                await both_expired.wait()
+                return _httpx_response(
+                    json_data={"success": False, "error": {"code": 119}},
+                )
+            assert request_sid == "fresh_sid"
+            return _httpx_response(
+                json_data={"success": True, "data": {"task_id": ["dbid_55"]}},
+            )
+
+        async def login_once():
+            await asyncio.sleep(0)
+            ds_client.sid = "fresh_sid"
+
+        ds_client.client.post = AsyncMock(side_effect=post_with_expired_sid)
+        ds_client._login = AsyncMock(side_effect=login_once)
+
+        results = await asyncio.gather(
+            ds_client.add_torrent_file(b"one", "one.torrent"),
+            ds_client.add_torrent_file(b"two", "two.torrent"),
+        )
+
+        assert results == ["dbid_55", "dbid_55"]
+        assert ds_client._login.await_count == 1
+        assert ds_client.client.post.await_count == 4
+
     # -- get_tasks -------------------------------------------------------
 
     async def test_get_tasks(self, ds_client):
@@ -213,6 +333,207 @@ class TestDownloadStationClient:
         assert len(tasks) == 2
         assert tasks[0]["title"] == "Movie.mkv"
         assert tasks[1]["title"] == "Album.flac"
+
+    async def test_get_tasks_v2_normalizes_status(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "total": 3,
+                "task": [
+                    {"id": "t1", "title": "Downloading", "status": 2},
+                    {"id": "t2", "title": "Paused", "status": 3},
+                    {"id": "t3", "title": "Finished", "status": 5},
+                ],
+            },
+        })
+
+        tasks = await ds_client.get_tasks()
+
+        assert [task["state"] for task in tasks] == [
+            "downloading", "paused", "completed",
+        ]
+        assert tasks[1]["status_label"] == "已暂停"
+        assert tasks[2]["status_label"] == "已完成"
+
+    async def test_get_tasks_v2_reads_all_api_pages(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+
+        def page(start, count):
+            return [
+                {"id": f"t{i}", "title": f"Task {i}", "status": 2}
+                for i in range(start, start + count)
+            ]
+
+        ds_client._api_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"total": 250, "task": page(0, 100)}},
+            {"success": True, "data": {"total": 250, "task": page(100, 100)}},
+            {"success": True, "data": {"total": 250, "task": page(200, 50)}},
+        ])
+
+        tasks = await ds_client.get_tasks()
+
+        assert len(tasks) == 250
+        offsets = [
+            call.kwargs["params"]["offset"]
+            for call in ds_client._api_request.await_args_list
+        ]
+        assert offsets == ["0", "100", "200"]
+
+    async def test_get_tasks_v2_stops_on_repeated_page(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        repeated = [
+            {"id": f"t{i}", "title": f"Task {i}", "status": 2}
+            for i in range(100)
+        ]
+        response = {"success": True, "data": {"total": 200, "task": repeated}}
+        ds_client._api_request = AsyncMock(side_effect=[response, response])
+
+        tasks = await ds_client.get_tasks()
+
+        assert len(tasks) == 100
+        assert ds_client._api_request.await_count == 2
+
+    async def test_get_tasks_page_uses_ds7_filter_sort_and_total(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "total_count": "27",
+                "task": [{"id": "t1", "title": "Paused", "status": 3}],
+            },
+        })
+
+        page = await ds_client.get_tasks_page(
+            -10,
+            1000,
+            statuses=[2, 3],
+            status_inverse=True,
+            sort_by="create_time",
+            order="asc",
+            additional=("detail",),
+        )
+
+        assert page.offset == 0
+        assert page.total == 27
+        assert page.tasks[0]["state"] == "paused"
+        params = ds_client._api_request.await_args.kwargs["params"]
+        assert params == {
+            "api": "SYNO.DownloadStation2.Task",
+            "version": "2",
+            "method": "list",
+            "offset": "0",
+            "limit": "100",
+            "sort_by": "create_time",
+            "order": "ASC",
+            "additional": '["detail"]',
+            "status": "[2, 3]",
+            "status_inverse": "true",
+            "_sid": "existing_sid",
+        }
+
+    async def test_get_tasks_page_cache_and_force_refresh(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={
+            "success": True,
+            "data": {"total": 0, "task": []},
+        })
+
+        first = await ds_client.get_tasks_page(0, 20)
+        second = await ds_client.get_tasks_page(0, 20)
+        refreshed = await ds_client.get_tasks_page(0, 20, force_refresh=True)
+
+        assert first is second
+        assert refreshed == first
+        assert ds_client._api_request.await_count == 2
+
+    async def test_get_tasks_page_coalesces_concurrent_cache_misses(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+
+        async def respond(*_args, **_kwargs):
+            await asyncio.sleep(0)
+            return {"success": True, "data": {"total": 0, "task": []}}
+
+        ds_client._api_request = AsyncMock(side_effect=respond)
+
+        pages = await asyncio.gather(
+            ds_client.get_tasks_page(0, 20),
+            ds_client.get_tasks_page(0, 20),
+            ds_client.get_tasks_page(0, 20),
+        )
+
+        assert pages[0] is pages[1] is pages[2]
+        ds_client._api_request.assert_awaited_once()
+
+    async def test_get_task_uses_ds7_task_get(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={
+            "success": True,
+            "data": {
+                "task": [{"id": "bt/42", "title": "Movie", "status": 2}],
+            },
+        })
+
+        task = await ds_client.get_task("bt/42", additional=("detail",))
+
+        assert task["id"] == "bt/42"
+        assert task["state"] == "downloading"
+        params = ds_client._api_request.await_args.kwargs["params"]
+        assert params["method"] == "get"
+        assert json.loads(params["id"]) == ["bt/42"]
+        assert json.loads(params["additional"]) == ["detail"]
+
+    async def test_get_task_returns_none_for_ds7_not_found(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(
+            side_effect=DownloadStationAPIError(404, {"code": 404})
+        )
+
+        assert await ds_client.get_task("missing") is None
+
+    async def test_pause_and_resume_use_json_task_id(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(
+            return_value={"success": True, "data": {}}
+        )
+
+        assert await ds_client.pause_task("bt/42") is True
+        assert await ds_client.resume_task("bt/42") is True
+
+        calls = ds_client._api_request.await_args_list
+        assert [call.kwargs["data"]["method"] for call in calls] == [
+            "pause", "resume",
+        ]
+        assert [json.loads(call.kwargs["data"]["id"]) for call in calls] == [
+            ["bt/42"], ["bt/42"],
+        ]
+
+    async def test_wait_for_task_status_polls_until_paused(self, ds_client):
+        ds_client.get_task = AsyncMock(side_effect=[
+            {"id": "bt-1", "status": 8},
+            {"id": "bt-1", "status": 8},
+            {"id": "bt-1", "status": 3},
+        ])
+
+        task = await ds_client.wait_for_task_status(
+            "bt-1", (3,), timeout=1, poll_interval=0,
+        )
+
+        assert task["status"] == 3
+        assert ds_client.get_task.await_count == 3
+        assert all(
+            call.kwargs["force_refresh"] is True
+            for call in ds_client.get_task.await_args_list
+        )
 
     # -- test_connection -------------------------------------------------
 
@@ -239,34 +560,437 @@ class TestDownloadStationClient:
         result = await ds_client.test_connection()
         assert result is False
 
-    # -- _request_with_retry SID expiry ----------------------------------
+    async def test_concurrent_connection_tests_refresh_once(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v1_profile()
 
-    async def test_api_request_sid_expiry(self, ds_client):
-        """First request returns success=false (SID expired), re-login then retry succeeds."""
+        async def login_once():
+            await asyncio.sleep(0)
+            ds_client.sid = "fresh_sid"
+
+        async def probe_once():
+            await asyncio.sleep(0)
+            return _v1_profile()
+
+        ds_client._login = AsyncMock(side_effect=login_once)
+        ds_client._run_api_probe = AsyncMock(side_effect=probe_once)
+        ds_client.get_tasks = AsyncMock(return_value=[])
+
+        results = await asyncio.gather(
+            ds_client.test_connection(),
+            ds_client.test_connection(),
+        )
+
+        assert results == [True, True]
+        assert ds_client._login.await_count == 1
+        assert ds_client._run_api_probe.await_count == 1
+        assert ds_client.get_tasks.await_count == 2
+
+    # -- request errors and SID expiry -----------------------------------
+
+    async def test_api_request_business_error_does_not_retry(self, ds_client):
         ds_client.sid = "old_sid"
+        ds_client.client.request = AsyncMock(return_value=_httpx_response(
+            json_data={"success": False, "error": {"code": 400}},
+        ))
+        ds_client.client.get = AsyncMock()
 
-        expired_resp = _httpx_response(
-            json_data={"success": False, "error": {"code": 105}}
-        )
-        success_resp = _httpx_response(
-            json_data={"success": True, "data": {"result": "ok"}}
-        )
+        with pytest.raises(DownloadStationAPIError) as exc_info:
+            await ds_client._api_request("GET", params={"_sid": "old_sid"})
 
-        ds_client.client.request = AsyncMock(
-            side_effect=[expired_resp, success_resp]
-        )
-        ds_client.client.get = AsyncMock(
-            return_value=_httpx_response(
-                json_data={"success": True, "data": {"sid": "new_sid"}}
-            )
-        )
+        assert exc_info.value.code == 400
+        ds_client.client.request.assert_awaited_once()
+        ds_client.client.get.assert_not_awaited()
+        assert ds_client.sid == "old_sid"
+
+    async def test_api_request_auth_106_relogs_and_retries_once(self, ds_client):
+        ds_client.sid = "old_sid"
+        ds_client.client.request = AsyncMock(side_effect=[
+            _httpx_response(
+                json_data={"success": False, "error": {"code": 106}},
+            ),
+            _httpx_response(
+                json_data={"success": True, "data": {"result": "ok"}},
+            ),
+        ])
+        ds_client.client.get = AsyncMock(return_value=_httpx_response(
+            json_data={"success": True, "data": {"sid": "new_sid"}},
+        ))
 
         result = await ds_client._api_request(
-            "GET", params={"_sid": "old_sid"}
+            "GET", params={"_sid": "old_sid"},
         )
-        assert result["success"] is True
+
+        assert result["data"]["result"] == "ok"
         assert ds_client.sid == "new_sid"
         assert ds_client.client.request.await_count == 2
+        assert ds_client.client.request.await_args.kwargs["params"]["_sid"] == "new_sid"
+
+    async def test_cache_invalidation_rejects_inflight_stale_write(self, ds_client):
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        call_count = 0
+
+        async def loader():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_started.set()
+                await release_first.wait()
+                return "stale"
+            return "fresh"
+
+        stale_read = asyncio.create_task(ds_client._cached_task_value(
+            ("task", "one"), loader, force_refresh=False,
+        ))
+        await first_started.wait()
+        ds_client.invalidate_task_cache()
+        fresh_read = asyncio.create_task(ds_client._cached_task_value(
+            ("task", "one"), loader, force_refresh=True,
+        ))
+        release_first.set()
+
+        assert await stale_read == "stale"
+        assert await fresh_read == "fresh"
+        assert call_count == 2
+        assert await ds_client._cached_task_value(
+            ("task", "one"), loader, force_refresh=False,
+        ) == "fresh"
+        assert call_count == 2
+
+    # -- precise file manifests -----------------------------------------
+
+    def test_build_file_manifest_preserves_unicode_and_multiple_files(self):
+        task = {
+            "id": "bt-1",
+            "type": "BT",
+            "additional": {
+                "detail": {"destination": "/volume1/下载"},
+            },
+        }
+        items = [
+            {
+                "name": "电影/正片.mkv",
+                "size": 1000,
+                "size_downloaded": 900,
+                "wanted": True,
+            },
+            {
+                "filename": "电影/字幕.zh-CN.srt",
+                "size": 20,
+                "size_downloaded": 0,
+                "wanted": True,
+            },
+            {
+                "name": "跳过.txt",
+                "size": 10,
+                "size_downloaded": 0,
+                "wanted": False,
+            },
+        ]
+
+        manifest = build_ds7_file_manifest(task, items)
+
+        assert manifest.task_id == "bt-1"
+        assert manifest.destination == "/volume1/下载"
+        assert manifest.paths == (
+            "/volume1/下载/电影/正片.mkv",
+            "/volume1/下载/电影/字幕.zh-CN.srt",
+        )
+        assert manifest.total_size == 920
+        assert len(manifest.fingerprint) == 64
+
+    @pytest.mark.parametrize("name", [
+        "../etc/passwd",
+        "movie/../../outside.mkv",
+        "/volume1/other/file.mkv",
+        "movie\\outside.mkv",
+        "movie\x00.mkv",
+        ".",
+        "./movie.mkv",
+        "movie//outside.mkv",
+    ])
+    def test_build_file_manifest_rejects_unsafe_paths(self, name):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "additional": {
+                "detail": {"destination": "/volume1/downloads"},
+            },
+        }
+
+        with pytest.raises(ValueError, match="路径"):
+            build_ds7_file_manifest(task, [{"name": name, "size": 1}])
+
+    @pytest.mark.parametrize("destination", [
+        "volume1/downloads",
+        "//volume1/downloads",
+        "/volume1//downloads",
+        "/volume1/../downloads",
+    ])
+    def test_build_file_manifest_rejects_ambiguous_destinations(self, destination):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "additional": {"detail": {"destination": destination}},
+        }
+
+        with pytest.raises(ValueError, match="下载目录"):
+            build_ds7_file_manifest(task, [{"name": "movie.mkv", "size": 1}])
+
+    def test_map_real_destination_to_file_station_share(self):
+        shares = [{
+            "path": "/downloads",
+            "additional": {"real_path": "/volume1/downloads"},
+        }]
+
+        assert _map_file_station_destination(
+            "/volume1/downloads/Movies", shares,
+        ) == "/downloads/Movies"
+        assert _map_file_station_destination(
+            "/downloads/Movies", shares,
+        ) == "/downloads/Movies"
+
+    def test_map_destination_uses_longest_real_path_prefix(self):
+        shares = [
+            {"path": "/data", "additional": {"real_path": "/volume1/data"}},
+            {
+                "path": "/movies",
+                "additional": {"real_path": "/volume1/data/movies"},
+            },
+        ]
+
+        assert _map_file_station_destination(
+            "/volume1/data/movies/Film", shares,
+        ) == "/movies/Film"
+
+    def test_map_destination_rejects_missing_or_ambiguous_share(self):
+        with pytest.raises(ValueError, match="无法将"):
+            _map_file_station_destination("/volume1/downloads", [])
+        duplicate_real_path = [
+            {"path": "/one", "additional": {"real_path": "/volume1/data"}},
+            {"path": "/two", "additional": {"real_path": "/volume1/data"}},
+        ]
+        with pytest.raises(ValueError, match="多个"):
+            _map_file_station_destination("/volume1/data/file", duplicate_real_path)
+
+    async def test_get_bt_task_files_reads_all_pages(self, ds_client):
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        first = [{"name": f"dir/{index:03}.mkv"} for index in range(100)]
+        second = [{"name": "dir/100.mkv"}]
+        ds_client._api_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"total": 101, "items": first}},
+            {"success": True, "data": {"total": 101, "items": second}},
+        ])
+
+        items = await ds_client.get_bt_task_files("bt-1")
+
+        assert len(items) == 101
+        assert [
+            call.kwargs["params"]["offset"]
+            for call in ds_client._api_request.await_args_list
+        ] == ["0", "100"]
+        assert all(
+            call.kwargs["params"]["task_id"] == "bt-1"
+            for call in ds_client._api_request.await_args_list
+        )
+
+    async def test_get_bt_task_files_rejects_incomplete_short_page(self, ds_client):
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        first = [{"name": f"dir/{index:03}.mkv"} for index in range(100)]
+        ds_client._api_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"total": 101, "items": first}},
+            {"success": True, "data": {"total": 101, "items": []}},
+        ])
+
+        with pytest.raises(RuntimeError, match="文件清单不完整"):
+            await ds_client.get_bt_task_files("bt-1")
+
+        assert ds_client._api_request.await_count == 2
+
+    async def test_get_bt_task_files_rejects_incomplete_loop_limit(self, ds_client):
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        ds_client._api_request = AsyncMock(return_value={
+            "success": True,
+            "data": {"total": 1001, "items": [{"name": "same.mkv"}]},
+        })
+
+        with patch("bot.clients.download_station._TASK_PAGE_LIMIT", 1):
+            with pytest.raises(RuntimeError, match="文件清单不完整"):
+                await ds_client.get_bt_task_files("bt-1")
+
+        assert ds_client._api_request.await_count == 1000
+
+    async def test_verify_file_manifest_requires_every_exact_path(self, ds_client):
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/下载",
+            paths=("/volume1/下载/一.mkv", "/volume1/下载/二.srt"),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
+        ds_client.sid = "sid"
+        ds_client._file_station_request = AsyncMock(return_value={
+            "success": True,
+            "data": {"files": [{"path": "/volume1/下载/一.mkv"}]},
+        })
+
+        with pytest.raises(ValueError, match="无法确认全部"):
+            await ds_client._verify_file_manifest_paths(manifest)
+
+        params = ds_client._file_station_request.await_args.kwargs["params"]
+        assert params["method"] == "getinfo"
+        assert json.loads(params["path"]) == list(manifest.paths)
+
+    async def test_verify_file_manifest_accepts_all_exact_paths(self, ds_client):
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/下载",
+            paths=("/volume1/下载/一.mkv", "/volume1/下载/二.srt"),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
+        ds_client.sid = "sid"
+        ds_client._file_station_request = AsyncMock(return_value={
+            "success": True,
+            "data": {"files": [
+                {"path": "/volume1/下载/二.srt", "additional": {"size": 2}},
+                {"path": "/volume1/下载/一.mkv", "additional": {"size": 10}},
+            ]},
+        })
+
+        await ds_client._verify_file_manifest_paths(manifest)
+
+        ds_client._file_station_request.assert_awaited_once()
+
+    async def test_prepare_manifest_maps_real_destination_before_verification(
+        self, ds_client,
+    ):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "additional": {"detail": {"destination": "/volume1/downloads"}},
+        }
+        ds_client.get_bt_task_files = AsyncMock(return_value=[
+            {"name": "Movies/Film.mkv", "size": 12, "wanted": True},
+        ])
+        ds_client._file_station_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"shares": [{
+                "path": "/downloads",
+                "additional": {"real_path": "/volume1/downloads"},
+            }]}},
+            {"success": True, "data": {"files": [{
+                "path": "/downloads/Movies/Film.mkv",
+                "isdir": False,
+                "additional": {
+                    "real_path": "/volume1/downloads/Movies/Film.mkv",
+                    "size": 12,
+                },
+            }]}},
+        ])
+
+        manifest = await ds_client.prepare_file_manifest(task)
+
+        assert manifest.destination == "/downloads"
+        assert manifest.paths == ("/downloads/Movies/Film.mkv",)
+        assert manifest.real_paths == ("/volume1/downloads/Movies/Film.mkv",)
+        assert manifest.file_sizes == (12,)
+        list_share = ds_client._file_station_request.await_args_list[0].kwargs["params"]
+        assert list_share["method"] == "list_share"
+        assert list_share["onlywritable"] == "true"
+
+    async def test_delete_file_manifest_polls_and_stops_operation(self, ds_client):
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/downloads",
+            paths=("/volume1/downloads/Movie/movie.mkv",),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
+        ds_client.sid = "sid"
+        ds_client._verify_file_manifest_paths = AsyncMock()
+        ds_client._file_station_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"taskid": "delete-7"}},
+            {"success": True, "data": {
+                "finished": False, "processed_num": 0, "total": 1,
+            }},
+            {"success": True, "data": {
+                "finished": True, "processed_num": 1, "total": 1,
+            }},
+            {"success": True, "data": {}},
+        ])
+
+        result = await ds_client.delete_file_manifest(
+            manifest, timeout=1, poll_interval=0,
+        )
+
+        assert result is True
+        ds_client._verify_file_manifest_paths.assert_awaited_once_with(manifest)
+        calls = ds_client._file_station_request.await_args_list
+        assert [
+            (call.args[0], (call.kwargs.get("data") or call.kwargs.get("params"))["method"])
+            for call in calls
+        ] == [
+            ("POST", "start"),
+            ("GET", "status"),
+            ("GET", "status"),
+            ("POST", "stop"),
+        ]
+        assert json.loads(calls[0].kwargs["data"]["path"]) == list(manifest.paths)
+        assert calls[0].kwargs["data"]["recursive"] == "false"
+
+    async def test_delete_file_manifest_status_failure_still_stops_operation(
+        self, ds_client,
+    ):
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/downloads",
+            paths=("/volume1/downloads/movie.mkv",),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
+        ds_client.sid = "sid"
+        ds_client._verify_file_manifest_paths = AsyncMock()
+        ds_client._file_station_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"taskid": "delete-7"}},
+            DownloadStationAPIError(400, {"code": 400}),
+            {"success": True, "data": {}},
+        ])
+
+        result = await ds_client.delete_file_manifest(
+            manifest, timeout=1, poll_interval=0,
+        )
+
+        assert result is False
+        assert ds_client._file_station_request.await_count == 3
+        assert ds_client._file_station_request.await_args.kwargs["data"]["method"] == "stop"
+
+    async def test_delete_file_manifest_rejects_incomplete_finished_count(
+        self, ds_client,
+    ):
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/downloads",
+            paths=("/downloads/one.mkv", "/downloads/two.srt"),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
+        ds_client._verify_file_manifest_paths = AsyncMock()
+        ds_client._file_station_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"taskid": "delete-8"}},
+            {"success": True, "data": {
+                "finished": True, "processed_num": 1, "total": 2,
+            }},
+            {"success": True, "data": {}},
+        ])
+
+        assert await ds_client.delete_file_manifest(
+            manifest, timeout=1, poll_interval=0,
+        ) is False
+        assert ds_client._file_station_request.await_count == 3
 
     # -- delete_task -----------------------------------------------------
 
@@ -274,94 +998,145 @@ class TestDownloadStationClient:
         ds_client.sid = "sid"
         ds_client._profile = _v1_profile()
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        result = await ds_client.delete_task("task_123")
+
+        result = await ds_client.delete_task("task_123", delete_files=True)
+
         assert result is True
-        call_data = ds_client._api_request.call_args[1]["data"]
+        call_data = ds_client._api_request.await_args.kwargs["data"]
         assert call_data["method"] == "delete"
-        assert "task_123" in call_data["id"]
+        assert call_data["id"] == "task_123"
 
-    async def test_delete_task_v1_skip_filestation(self, ds_client):
-        """v1 不调用 File Station API，即使 delete_files=True。"""
-        ds_client.sid = "sid"
-        ds_client._profile = _v1_profile()
-        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        ds_client._filestation_delete = AsyncMock()
-        result = await ds_client.delete_task("task_123", delete_files=True)
-        assert result is True
-        ds_client._filestation_delete.assert_not_awaited()
-
-    async def test_delete_task_v2_calls_filestation(self, ds_client):
-        """v2 且 delete_files=True 时调用 File Station API 删文件。"""
+    async def test_delete_task_v2_keep_files_skips_manifest(self, ds_client):
         ds_client.sid = "sid"
         ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock()
+        ds_client.prepare_file_manifest = AsyncMock()
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        ds_client._get_task_file_path = AsyncMock(return_value="/volume1/downloads/Movie")
-        ds_client._filestation_delete = AsyncMock()
-        result = await ds_client.delete_task("task_123", delete_files=True)
-        assert result is True
-        ds_client._filestation_delete.assert_awaited_once_with("/volume1/downloads/Movie")
 
-    async def test_delete_task_v2_skip_filestation_when_false(self, ds_client):
-        """delete_files=False 时不调用 File Station API。"""
+        result = await ds_client.delete_task("bt-1", delete_files=False)
+
+        assert result is True
+        ds_client.get_task.assert_not_awaited()
+        ds_client.prepare_file_manifest.assert_not_awaited()
+        data = ds_client._api_request.await_args.kwargs["data"]
+        assert data["method"] == "delete"
+        assert json.loads(data["id"]) == ["bt-1"]
+        assert data["force_complete"] == "false"
+
+    async def test_delete_task_v2_deletes_verified_completed_bt_files(self, ds_client):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "status": 5,
+            "additional": {"detail": {"destination": "/volume1/downloads"}},
+        }
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/downloads",
+            paths=("/volume1/downloads/movie.mkv",),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
         ds_client.sid = "sid"
         ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock(return_value=task)
+        ds_client.prepare_file_manifest = AsyncMock(return_value=manifest)
+        ds_client.delete_file_manifest = AsyncMock(return_value=True)
+        ds_client.pause_task = AsyncMock()
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        ds_client._filestation_delete = AsyncMock()
-        result = await ds_client.delete_task("task_123", delete_files=False)
-        assert result is True
-        ds_client._filestation_delete.assert_not_awaited()
 
-    async def test_delete_task_v2_filestation_failure_still_succeeds(self, ds_client):
-        """File Station 删文件失败不影响任务删除结果。"""
+        result = await ds_client.delete_task("bt-1", delete_files=True)
+
+        assert result is True
+        ds_client.prepare_file_manifest.assert_awaited_once_with(task)
+        ds_client.delete_file_manifest.assert_awaited_once_with(manifest)
+        ds_client.pause_task.assert_not_awaited()
+        assert ds_client._api_request.await_args.kwargs["data"]["method"] == "delete"
+
+    async def test_delete_task_v2_pauses_seeding_before_file_deletion(self, ds_client):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "status": 8,
+            "additional": {"detail": {"destination": "/volume1/downloads"}},
+        }
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/downloads",
+            paths=("/volume1/downloads/movie.mkv",),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
         ds_client.sid = "sid"
         ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock(return_value=task)
+        ds_client.prepare_file_manifest = AsyncMock(return_value=manifest)
+        ds_client.pause_task = AsyncMock(return_value=True)
+        ds_client.wait_for_task_status = AsyncMock(return_value={
+            **task, "status": 3,
+        })
+        ds_client.delete_file_manifest = AsyncMock(return_value=True)
         ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        ds_client._get_task_file_path = AsyncMock(return_value="/volume1/downloads/Movie")
-        ds_client._filestation_delete = AsyncMock(side_effect=Exception("FileStation error"))
-        result = await ds_client.delete_task("task_123", delete_files=True)
-        assert result is True
 
-    async def test_get_task_file_path_found(self, ds_client):
-        """找到任务时返回正确路径。"""
-        ds_client.get_tasks = AsyncMock(return_value=[{
-            "id": "task_123",
-            "title": "My Movie",
-            "additional": {"detail": {"destination": "/volume1/downloads"}, "transfer": {}},
-        }])
-        path = await ds_client._get_task_file_path("task_123")
-        assert path == "/volume1/downloads/My Movie"
+        assert await ds_client.delete_task("bt-1", delete_files=True) is True
+        ds_client.pause_task.assert_awaited_once_with("bt-1")
+        ds_client.wait_for_task_status.assert_awaited_once_with("bt-1", (3,))
+        ds_client.delete_file_manifest.assert_awaited_once_with(manifest)
 
-    async def test_get_task_file_path_not_found(self, ds_client):
-        """任务不存在时返回 None。"""
-        ds_client.get_tasks = AsyncMock(return_value=[])
-        path = await ds_client._get_task_file_path("task_999")
-        assert path is None
-
-    async def test_get_task_file_path_missing_dest(self, ds_client):
-        """destination 为空时返回 None。"""
-        ds_client.get_tasks = AsyncMock(return_value=[{
-            "id": "task_123",
-            "title": "My Movie",
-            "additional": {"detail": {"destination": ""}, "transfer": {}},
-        }])
-        path = await ds_client._get_task_file_path("task_123")
-        assert path is None
-
-    async def test_filestation_delete_calls_api(self, ds_client):
-        """_filestation_delete 调用正确的 API。"""
+    @pytest.mark.parametrize(("task_type", "status"), [
+        ("bt", 2),
+        ("http", 5),
+    ])
+    async def test_delete_task_v2_rejects_unsafe_file_deletion(
+        self, ds_client, task_type, status,
+    ):
+        task = {"id": "bt-1", "type": task_type, "status": status}
         ds_client.sid = "sid"
-        ds_client._api_request = AsyncMock(return_value={"success": True, "data": {}})
-        await ds_client._filestation_delete("/volume1/downloads/Movie")
-        call_data = ds_client._api_request.call_args[1]["data"]
-        assert call_data["api"] == "SYNO.FileStation.Delete"
-        assert call_data["method"] == "start"
-        assert "/volume1/downloads/Movie" in call_data["path"]
+        ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock(return_value=task)
+        ds_client.prepare_file_manifest = AsyncMock()
+        ds_client._api_request = AsyncMock()
 
-    async def test_filestation_delete_failure_silent(self, ds_client):
-        """_filestation_delete 失败时不抛异常。"""
+        result = await ds_client.delete_task("bt-1", delete_files=True)
+
+        assert result is False
+        ds_client.prepare_file_manifest.assert_not_awaited()
+        ds_client._api_request.assert_not_awaited()
+
+    async def test_delete_task_v2_keeps_task_when_file_deletion_fails(self, ds_client):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "status": 5,
+            "additional": {"detail": {"destination": "/volume1/downloads"}},
+        }
+        manifest = DS7FileManifest(
+            task_id="bt-1",
+            destination="/volume1/downloads",
+            paths=("/volume1/downloads/movie.mkv",),
+            total_size=12,
+            fingerprint="f" * 64,
+        )
         ds_client.sid = "sid"
-        ds_client._api_request = AsyncMock(side_effect=Exception("network error"))
-        await ds_client._filestation_delete("/volume1/downloads/Movie")  # 不应抛出
+        ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock(return_value=task)
+        ds_client.prepare_file_manifest = AsyncMock(return_value=manifest)
+        ds_client.delete_file_manifest = AsyncMock(return_value=False)
+        ds_client._api_request = AsyncMock()
+
+        result = await ds_client.delete_task("bt-1", delete_files=True)
+
+        assert result is False
+        ds_client._api_request.assert_not_awaited()
+
+    async def test_delete_task_v2_missing_task_is_idempotent_success(self, ds_client):
+        ds_client.sid = "sid"
+        ds_client._profile = _v2_profile()
+        ds_client.get_task = AsyncMock(return_value=None)
+        ds_client._api_request = AsyncMock()
+
+        assert await ds_client.delete_task("missing", delete_files=True) is True
+        ds_client._api_request.assert_not_awaited()
 
     # -- close -----------------------------------------------------------
 

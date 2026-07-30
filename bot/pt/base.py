@@ -26,7 +26,7 @@ class PTSiteBase(ABC):
         ...
 
     @abstractmethod
-    async def download_torrent(self, torrent_url: str) -> bytes:
+    async def download_torrent(self, torrent_url: str, cookie: str = "") -> bytes:
         """下载 .torrent 文件，返回字节内容"""
         ...
 

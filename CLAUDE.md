@@ -12,7 +12,7 @@ PT Download Bot — a Telegram bot that searches PT sites (NexusPHP-based) for t
 # Run bot locally
 python -m bot.main
 
-# Tests (387 tests, 88% coverage)
+# Tests
 python3 -m pytest tests/                          # all tests
 python3 -m pytest tests/test_handlers.py          # single file
 python3 -m pytest tests/test_core.py::TestDatabase # single class
@@ -53,17 +53,19 @@ docker compose logs -f
 
 **Search pagination & caching**: Module-level `user_cache` (per user) stores results + page state. `_search_result_cache` (keyed by normalized keyword, TTL 300s, max 200 entries) prevents duplicate PT site requests. Both caches must be cleared in test fixtures.
 
-**Download task tracking**: `download_logs` table has `task_id` column linking to download client's task ID. `add_torrent_url`/`add_torrent_file` return `Optional[str]` (task_id or None). Callers must use `if result is not None:` (not `if result:`) because empty string `""` means success without task_id.
+**Download task tracking**: `download_logs` links downloads to client task IDs and uses `task_active` plus the row `id` as the current ownership-binding generation. Reusing a task ID deactivates its previous binding; task tokens record the binding row and must reject a callback if that exact generation is no longer active. Removing or discovering a missing task deactivates only the generation that was acted on. Rows migrated from schemas without `task_active` are conservatively inactive because historical task IDs may have been reused. `add_torrent_url`/`add_torrent_file` return `Optional[str]` (task_id or None). Callers must use `if result is not None:` (not `if result:`) because empty string `""` means success without task_id.
 
-**User task isolation**: `/status` shows only the user's own tasks (matched via `download_logs.task_id`). Owner sees all by default, `/status mine` to filter. `bot/handlers/status.py` groups tasks by state (downloading/paused/seeding) with progress bars and ETA.
+**User task isolation**: `/status` shows only the user's active task bindings. Owner sees all by default, `/status mine` to filter. DS7 owner pages use native `Task.list` pagination; user pages and completion notifications use targeted `Task.get` calls for tracked IDs, never a full task scan. Task reads use a 4-second per-key cache with singleflight.
 
-**Task deletion**: `/cancel <序号>` and ❌ buttons on `/status` allow users to delete tasks. Two-step confirmation via `cdel:` → `delok:`/`delno:` callback chain. Users can only delete their own tasks; Owner can delete any.
+**Task status/deletion**: DS7 `/status` provides active/completed views, sanitized details, pause/resume/retry/reseed controls, and expiring server-side short-token (`dst:`) callbacks. Removing a task preserves files by default. Completed/seeding BT tasks additionally offer explicit file deletion only after every `Task.BT.File` page reports one stable total and the complete manifest is fetched. A separate `session=FileStation` SID resolves the DS real destination through `list_share.additional.real_path`; File Station must then confirm each virtual path, real path, and file size. The manifest fingerprint is checked again before deletion, seeding must reach paused status, and async deletion must report `processed_num == total == batch size`. No title- or destination-derived wildcard cleanup is allowed. `/cancel` only redirects to `/status`. On DS7, old `cdel:`/`delok:` buttons only ask the user to refresh `/status`; DSM6 still uses that legacy confirmation flow. Users can only manage active task bindings they own; Owner can manage any task.
 
-**Download completion notifications** (`bot/handlers/notify.py`): `check_completed_tasks()` runs every 60s via JobQueue. Compares current task statuses against a snapshot in `context.bot_data["_task_snapshot"]`. First run only takes snapshot (no notifications). Notifies task owner + Owner when a Bot-added task completes.
+**Download client namespace changes**: The task namespace identity is `(client type, normalized host, username)`. Changing any of those values deactivates all active bindings from the old client and clears the status-token registry, task-status snapshot, and pending completion deliveries. A password-only credential update keeps the existing namespace and runtime state.
+
+**Download completion notifications** (`bot/handlers/notify.py`): `check_completed_tasks()` runs every 60s via JobQueue. For DS7 it fetches only active tracked task IDs, compares their status against `context.bot_data["_task_snapshot"]`, and notifies the task owner plus Owner on the first transition into completed/pre-seeding/seeding state. After the initial silent snapshot, a newly tracked task first observed as completed is also notified. Pending delivery is retained per task and recipient so only failed recipients are retried.
 
 **PT site risk mitigation**: Browser User-Agent, Accept/Accept-Language headers. `asyncio.Semaphore(3)` limits concurrent PT site requests. `download_torrent()` validates URL domain matches `base_url` before fetching.
 
-**Security**: All `/set*` commands that receive sensitive data immediately delete the user's message. `/settings` only shows "已配置/未配置" status. Callback handlers (`dl_callback`, `page_callback`, `delete_*_callback`) check `db.is_authorized()` and validate callback_data format. SSL verification enabled for HTTPS connections, disabled for HTTP (internal NAS). SQLite uses WAL mode + `busy_timeout=5000`. Database file permissions set to 600.
+**Security**: All `/set*` commands that receive sensitive data immediately delete the user's message. `/settings` only shows "已配置/未配置" status. Callback handlers validate authorization, viewer ownership, active binding generation, task ownership, and callback format. DS7 destructive actions use expiring one-time server-side tokens and re-fetch current task state before mutation. SSL verification is enabled for HTTPS and disabled for HTTP (internal NAS). SQLite uses WAL mode + `busy_timeout=5000`; the database file mode is 600.
 
 ## Key Constraints
 
@@ -73,7 +75,7 @@ docker compose logs -f
 - SQLite via stdlib `sqlite3` (no ORM). Single `Database` instance, `check_same_thread=False`, WAL mode.
 - Only 2 required env vars: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`. Everything else via Bot commands.
 - Docker: `network_mode: host`, non-root `botuser` via `entrypoint.sh` + `gosu`, `entrypoint.sh` fixes volume permissions and tightens `bot.db` to 600.
-- DB has 3 tables: `users` (role: owner/user/pending/banned), `download_logs` (with `task_id`), `settings` (KV store for all runtime config). `_migrate_tables()` adds new columns incrementally.
+- DB has 3 tables: `users` (role: owner/user/pending/banned), `download_logs` (with `task_id` and `task_active`), `settings` (KV store for all runtime config). `_migrate_tables()` adds new columns incrementally.
 - Multi-arch Docker images (amd64 + arm64) built by GitHub Actions, published to `ghcr.io/tripplemay/pt-download-bot`.
 
 ## Testing Patterns

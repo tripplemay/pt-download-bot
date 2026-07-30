@@ -15,6 +15,12 @@ from bot.pt.nexusphp import NexusPHPSite
 
 logger = logging.getLogger(__name__)
 
+_DL_RUNTIME_STATE_KEYS = (
+    "status_token_registry",
+    "_task_snapshot",
+    "_completion_notification_pending",
+)
+
 
 # ------------------------------------------------------------------
 # 通用辅助
@@ -59,6 +65,16 @@ def _is_valid_url(url: str) -> bool:
         return r.scheme in ("http", "https") and bool(r.netloc)
     except Exception:
         return False
+
+
+def _download_client_identity(client_type: str | None, host: str | None,
+                              username: str | None) -> tuple[str, str, str]:
+    """Return the task namespace identity; credentials alone do not change it."""
+    return (
+        (client_type or "").strip().lower(),
+        (host or "").strip().rstrip("/"),
+        (username or "").strip(),
+    )
 
 
 # ------------------------------------------------------------------
@@ -216,10 +232,23 @@ async def _set_dl_client(
         return
 
     db = context.bot_data["db"]
+    old_identity = _download_client_identity(
+        db.get_setting("dl_client_type"),
+        db.get_setting("dl_client_host"),
+        db.get_setting("dl_client_username"),
+    )
+    new_identity = _download_client_identity(client_type, host, username)
+    client_changed = old_identity != new_identity
     db.set_setting("dl_client_type", client_type)
     db.set_setting("dl_client_host", host)
     db.set_setting("dl_client_username", username)
     db.set_setting("dl_client_password", password)
+
+    reset_count = 0
+    if client_changed:
+        reset_count = db.deactivate_all_tasks()
+        for key in _DL_RUNTIME_STATE_KEYS:
+            context.bot_data.pop(key, None)
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -228,14 +257,27 @@ async def _set_dl_client(
 
     # 重新初始化并测试
     from bot.main import init_dl_client
+    old_client = context.bot_data.get("dl_client")
     dl_client = init_dl_client(db)
     context.bot_data["dl_client"] = dl_client
+    if old_client is not None and old_client is not dl_client:
+        try:
+            await old_client.close()
+        except Exception:
+            logger.warning("关闭旧下载客户端失败", exc_info=True)
+
+    reset_note = (
+        f"\n已清理 {reset_count} 个旧下载客户端任务绑定。"
+        if reset_count else ""
+    )
 
     if dl_client:
         try:
             ok = await dl_client.test_connection()
             if ok:
-                await msg.edit_text(f"{display_name} 连接成功！下载功能已启用。")
+                await msg.edit_text(
+                    f"{display_name} 连接成功！下载功能已启用。{reset_note}"
+                )
                 await _notify_setup_complete(update, context)
                 return
         except Exception:
@@ -243,7 +285,7 @@ async def _set_dl_client(
 
         await msg.edit_text(
             f"{display_name} 配置已保存，但连接测试失败。\n"
-            "请检查地址和凭据是否正确，然后用 /test 重试。"
+            f"请检查地址和凭据是否正确，然后用 /test 重试。{reset_note}"
         )
     else:
         await msg.edit_text("配置保存失败，请检查参数。")

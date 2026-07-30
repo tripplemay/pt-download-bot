@@ -311,7 +311,7 @@ class TestNexusPHPSearch:
 class TestNexusPHPDownload:
 
     async def test_download_returns_bytes(self):
-        torrent_bytes = b"\xd8\x06torrent-content-here"
+        torrent_bytes = b"d8:announce14:https://tracker4:infolee"
         site = _make_site()
         site._client = AsyncMock()
         site._client.get.return_value = _mock_response(content=torrent_bytes)
@@ -319,7 +319,34 @@ class TestNexusPHPDownload:
         result = await site.download_torrent("https://example.com/download.php?id=1")
 
         assert result == torrent_bytes
-        site._client.get.assert_called_once_with("https://example.com/download.php?id=1")
+        site._client.get.assert_called_once_with(
+            "https://example.com/download.php?id=1", headers=None,
+        )
+
+    async def test_download_passes_cookie(self):
+        site = _make_site()
+        site._client = AsyncMock()
+        site._client.get.return_value = _mock_response(content=b"d4:infode")
+
+        await site.download_torrent(
+            "https://example.com/download.php?id=1",
+            cookie="uid=1; pass=abc",
+        )
+
+        site._client.get.assert_called_once_with(
+            "https://example.com/download.php?id=1",
+            headers={"Cookie": "uid=1; pass=abc"},
+        )
+
+    async def test_download_rejects_login_page(self):
+        site = _make_site()
+        site._client = AsyncMock()
+        response = _mock_response(content=b"<html><title>Login</title></html>")
+        response.url = "https://example.com/login.php"
+        site._client.get.return_value = response
+
+        with pytest.raises(ValueError, match="不是有效 .torrent"):
+            await site.download_torrent("https://example.com/download.php?id=1")
 
     async def test_download_http_error(self):
         site = _make_site()

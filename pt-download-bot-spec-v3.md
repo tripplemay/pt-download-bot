@@ -138,17 +138,23 @@ CREATE TABLE users (
 );
 ```
 
-**download_logs 表 — 下载记录（可选，用于统计）**
+**download_logs 表 — 下载记录与当前任务归属**
 ```sql
 CREATE TABLE download_logs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id   INTEGER NOT NULL,
     torrent_title TEXT,
     torrent_size  TEXT,
+    task_id       TEXT,
+    task_active   INTEGER NOT NULL DEFAULT 1,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (telegram_id) REFERENCES users(telegram_id)
 );
+
+CREATE INDEX idx_download_logs_task_id ON download_logs(task_id);
 ```
+
+`task_active = 1` 表示该行是当前有效的任务归属，行 `id` 同时作为绑定代际。记录一个已存在的 `task_id` 时，必须在同一事务中先失活旧绑定再写入新行；状态按钮必须携带服务端保存的绑定 `id`，执行时只接受仍然活动的同一代际。旧数据库新增 `task_active` 列时默认迁移为 `0`，避免复用过的历史任务 ID 被误认领。
 
 ### 4.2 为什么用 SQLite
 
@@ -183,7 +189,11 @@ pt-download-bot/
 │   │   ├── start.py            # /start, /apply, /help
 │   │   ├── search.py           # /search, /s, /more
 │   │   ├── download.py         # /dl
-│   │   ├── status.py           # /status
+│   │   ├── download_utils.py   # PT 种子鉴权下载与上传
+│   │   ├── status.py           # /status、分页、详情和任务控制
+│   │   ├── status_tokens.py    # DS7 短生命周期操作令牌
+│   │   ├── notify.py           # 下载完成轮询和 pending 投递
+│   │   ├── settings.py         # 运行时配置与客户端切换
 │   │   └── admin.py            # /users, /ban, /pending（Owner 专属）
 │   ├── pt/
 │   │   ├── __init__.py
@@ -819,29 +829,27 @@ async def download_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.effective_message.reply_text("⬇️ 正在添加下载任务...")
 
     dl_client = context.bot_data["dl_client"]
+    pt_client = context.bot_data["pt_client"]
+    db = context.bot_data["db"]
 
-    # 方式1: URL
+    # PT URL 需要 Cookie/Passkey 鉴权。始终由 Bot 下载并校验种子文件后上传，
+    # 不把 URL 直接交给下载器，避免鉴权重定向产生 login.php 垃圾任务。
     try:
-        success = await dl_client.add_torrent_url(selected.torrent_url)
+        torrent_bytes = await pt_client.download_torrent(
+            selected.torrent_url,
+            cookie=db.get_setting("pt_cookie") or "",
+        )
+        safe_name = "".join(c for c in selected.title[:50] if c.isalnum() or c in " .-_")
+        task_id = await dl_client.add_torrent_file(torrent_bytes, f"{safe_name}.torrent")
     except Exception as e:
-        logger.warning(f"URL 方式添加失败: {e}")
-        success = False
+        logger.error(f"下载或上传种子文件失败: {e}")
+        task_id = None
 
-    # 方式2: 文件上传
-    if not success:
-        try:
-            pt_client = context.bot_data["pt_client"]
-            torrent_bytes = await pt_client.download_torrent(selected.torrent_url)
-            safe_name = "".join(c for c in selected.title[:50] if c.isalnum() or c in " .-_")
-            success = await dl_client.add_torrent_file(torrent_bytes, f"{safe_name}.torrent")
-        except Exception as e:
-            logger.error(f"文件方式也失败: {e}")
-            success = False
-
-    if success:
-        # 记录下载日志
-        db = context.bot_data["db"]
-        db.log_download(user_id, selected.title, selected.size)
+    # 空字符串表示客户端已接受任务但没有返回 ID，因此不能用真值判断。
+    if task_id is not None:
+        db.log_download(
+            user_id, selected.title, selected.size, task_id=task_id,
+        )
 
         display_name = user.full_name or user.username or str(user.id)
         await msg.edit_text(
@@ -887,6 +895,15 @@ from bot.handlers.start import start_command, apply_command, approval_callback, 
 from bot.handlers.search import search_command, more_command
 from bot.handlers.download import download_command
 from bot.handlers.admin import users_command, pending_command, ban_command, unban_command
+from bot.handlers.notify import check_completed_tasks
+from bot.handlers.status import (
+    status_command,
+    status_page_callback,
+    ds_status_action_callback,
+    delete_confirm_callback,
+    delete_execute_callback,
+    delete_cancel_callback,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -919,35 +936,9 @@ async def test_command(update, context):
     await msg.edit_text(text, parse_mode="HTML")
 
 
-async def status_command(update, context):
-    """查看下载状态"""
-    from bot.middleware import require_auth
-    db = context.bot_data["db"]
-    if not db.is_authorized(update.effective_user.id):
-        await update.effective_message.reply_text("👋 发送 /apply 申请使用权限")
-        return
-
-    dl_client = context.bot_data["dl_client"]
-    try:
-        tasks = await dl_client.get_tasks()
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ 获取任务列表失败: {e}")
-        return
-
-    if not tasks:
-        await update.effective_message.reply_text("📭 当前没有下载任务")
-        return
-
-    lines = [f"📥 <b>当前下载任务</b> ({len(tasks)} 个)\n"]
-    for t in tasks[:10]:
-        name = t.get("title") or t.get("name", "未知")
-        name_short = name[:40] + "..." if len(name) > 40 else name
-        lines.append(f"• {name_short}")
-
-    if len(tasks) > 10:
-        lines.append(f"\n... 还有 {len(tasks) - 10} 个任务")
-
-    await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
+# /status 的实现位于 bot/handlers/status.py。DS7 Owner 全部视图使用原生
+# Task.list 分页，用户视图使用活动绑定 ID 做 Task.get 定向查询；DSM6
+# 由同一入口分流到 legacy 实现。
 
 
 def main():
@@ -994,6 +985,14 @@ def main():
 
     # 审批按钮回调
     app.add_handler(CallbackQueryHandler(approval_callback, pattern=r"^(approve|reject):"))
+    app.add_handler(CallbackQueryHandler(status_page_callback, pattern=r"^stat:"))
+    app.add_handler(CallbackQueryHandler(ds_status_action_callback, pattern=r"^dst:"))
+    app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^cdel:"))
+    app.add_handler(CallbackQueryHandler(delete_execute_callback, pattern=r"^delok:"))
+    app.add_handler(CallbackQueryHandler(delete_cancel_callback, pattern=r"^delno:"))
+
+    # 首轮只建立快照；之后每 60 秒检查完成状态及 pending 投递。
+    app.job_queue.run_repeating(check_completed_tasks, interval=60, first=10)
 
     logger.info("Bot is running...")
     app.run_polling(allowed_updates=["message", "callback_query"])
@@ -1069,17 +1068,65 @@ def load_config():
 
 ## 八、PT 站和下载客户端模块
 
-PT 站模块（`bot/pt/`）和下载客户端模块（`bot/clients/`）与 v2 版本相同，此处不再重复。包括：
+### 8.1 模块边界
 
 - `bot/pt/base.py` — PT 站抽象基类
 - `bot/pt/nexusphp.py` — NexusPHP 通用实现（CHDBits 等）
 - `bot/clients/base.py` — 下载客户端基类
-- `bot/clients/download_station.py` — 群晖 Download Station
+- `bot/clients/download_station.py` — 群晖 Download Station DSM 6/7 API、任务缓存和 File Station 精确删除
 - `bot/clients/qbittorrent.py` — qBittorrent
 - `bot/clients/transmission.py` — Transmission
 - `bot/clients/__init__.py` — 工厂函数 `create_download_client()`
+- `bot/handlers/status.py` — 状态视图、详情、任务控制和删除编排
+- `bot/handlers/status_tokens.py` — DS7 服务端短令牌注册表
+- `bot/handlers/notify.py` — 下载完成检测与 pending 投递
 
-请参考 v2 方案中的对应代码。
+### 8.2 DSM 6/7 查询策略
+
+Download Station 客户端首次使用时探测 API profile。DSM 7 使用 `SYNO.DownloadStation2.Task` v2，DSM 6 回退到 `SYNO.DownloadStation.Task` v1；登录、profile 探测和 File Station 登录都必须 singleflight，避免并发请求重复创建会话。
+
+- **DS7 Owner 全部视图**：使用 `Task.list` 的 `offset`/`limit` 原生分页，每页 8 条；进行中与完成/做种通过状态过滤和 `status_inverse` 分开查询，同时用轻量计数页和 `Task.Statistic` 生成汇总。不得先扫描全部任务再截取前若干条。
+- **DS7 用户视图与 `/status mine`**：从数据库取用户当前活动绑定的任务 ID，再通过 `Task.get` 定向查询，最多 50 个 ID 一批；本地分组、排序和分页，不读取该用户无权查看的 DS 任务。
+- **DS7 完成通知**：同样只对数据库中的全部活动任务 ID 使用定向 `Task.get`，不做全量任务扫描。
+- **缓存**：分页、定向查询和统计按完整请求键缓存 4 秒，最多 128 项；同键并发 miss 共用一个请求。显式刷新绕过缓存，任务创建、暂停、继续或删除后立即失效相关任务缓存。
+- **DSM6**：继续使用 v1 `get_tasks()` 返回的 legacy 状态页和删除确认流程，不调用 DS7 专属的 `Task.get`、详情控制或 File Station 删除能力。
+
+### 8.3 状态页、详情与控制
+
+`/status` 对普通用户只展示自己的活动绑定；Owner 默认查看 DS 中全部任务，`/status mine` 切回自己的任务。页面分为“进行中”和“完成/做种”两个视图，支持上一页、下一页和强制刷新。DS7 详情显示标题、状态、类型、进度、速度、上传量、分享率、目录、时间和连接数，但不得输出源 URI 或解压密码等敏感字段。
+
+DS7 任务面板按实时状态提供以下操作：
+
+- 等待、下载、处理、校验或做种等可暂停状态显示“暂停”；
+- 已暂停任务显示“继续”；错误状态显示“重试”；已完成 BT 任务显示“重新做种”；
+- 所有操作执行前都强制重新读取当前任务，并再次校验授权、查看者、任务归属和活动绑定代际；状态不再适用时拒绝执行。
+
+分页回调使用 `stat:<viewer>:<mode>:<view>:<page>`。任务回调只携带 `dst:<operation>:<short-token>`；真实 task ID、查看者、页面上下文、动作、存在时的活动绑定行 `id` 和删除清单指纹保存在进程内注册表。令牌默认 30 分钟过期、注册表最多 2048 项，确认删除文件或仅移除任务的令牌只能消费一次，并始终受 Telegram 64 字节 callback_data 限制。
+
+旧消息兼容必须按 API profile 分流：DS7 收到旧 `cdel:` 或 `delok:` 回调时只提示重新发送 `/status`，不得继续确认或执行删除；DSM6 仍执行 `cdel:` → `delok:`/`delno:` legacy 流程。`/cancel` 不再接受易随列表变化的序号，只引导用户从 `/status` 选择任务。
+
+### 8.4 活动绑定与客户端命名空间
+
+每次 Bot 成功创建下载任务后写入 `download_logs(task_id, task_active=1)`。同一 `task_id` 再次出现时，旧行先失活，新行 `id` 成为新的绑定代际。普通用户的列表、通知和操作都只认当前活动绑定；任务消失、任务移除或文件删除成功后，仅失活操作所针对的代际，过期按钮不能影响后来复用同一 task ID 的任务。
+
+下载客户端命名空间由 `(client_type, normalized_host, username)` 决定，其中主机地址会去除首尾空白和末尾 `/`。通过 `/setds`、`/setqb` 或 `/settr` 改变其中任一项时，必须失活全部旧客户端绑定，并清除 `status_token_registry`、`_task_snapshot` 和 `_completion_notification_pending`。只修改同一客户端身份的密码不清理绑定或运行时状态。
+
+### 8.5 DS7 精确文件删除
+
+“移除任务”默认始终保留文件。只有状态为已完成或做种中且类型为 BT 的任务，才允许用户另行选择删除已下载文件。该操作必须满足全部条件，否则拒绝删除：
+
+1. 读取 `Task.BT.File` 的全部分页；每页报告的 `total` 必须稳定，最终条数必须与总数完全一致。
+2. 从任务 destination 构造精确文件清单，不允许路径穿越、目录项、重复路径、标题推测、目标目录通配或递归清理。
+3. 使用独立的 `session=FileStation` SID，通过 `SYNO.FileStation.List.list_share` 的 `additional.real_path` 将 DS destination 映射到真实共享路径。
+4. File Station `getinfo` 必须逐项确认虚拟路径、真实路径和文件大小；确认页保存清单指纹，执行前重新取任务和完整清单并要求指纹不变。
+5. 做种中的任务先暂停并等待状态变为 paused。随后以非递归、最多 100 路径一批启动 File Station 异步删除，并要求每批最终满足 `processed_num == total == batch size`。
+6. 只有全部文件确认删除后才移除 Download Station 任务；文件删除不完整时保留任务并要求人工核对。
+
+### 8.6 完成通知与 pending 投递
+
+JobQueue 启动 10 秒后首次运行，之后每 60 秒轮询。首次只建立静默快照；后续在任务首次进入已完成、准备做种或做种状态时，为任务所有者和 Owner 建立通知。初始快照后新绑定且首次观察即完成的任务也需要通知。
+
+待发送数据按 `task_id -> recipient -> message` 保存。发送成功后立即移除该接收者，失败接收者保留到下一轮重试，因此一方发送失败不会让已成功的另一方重复收到；即使本轮任务查询失败，也继续尝试投递已有 pending 项。客户端命名空间切换时清空快照和 pending，防止新旧客户端的相同 task ID 串联。
 
 ---
 
@@ -1122,7 +1169,7 @@ services:
 
 ### requirements.txt
 ```
-python-telegram-bot>=20.0
+python-telegram-bot[job-queue]>=20.0
 httpx>=0.25.0
 feedparser>=6.0
 ```
@@ -1191,7 +1238,8 @@ docker-compose logs -f       # 查看日志
 | `/s` 或 `/search` | 搜索影片 | `/s 星际穿越` |
 | `/dl` | 下载 | `/dl 3` |
 | `/more` | 下一页 | `/more` |
-| `/status` | 查看下载任务 | `/status` |
+| `/status` | 查看和控制下载任务；普通用户只看自己的活动绑定 | `/status` |
+| `/status mine` | Owner 只查看自己的活动绑定 | `/status mine` |
 
 ### 管理员 (Owner)
 | 命令 | 说明 | 示例 |
@@ -1224,15 +1272,16 @@ docker-compose logs -f       # 查看日志
 5. **封禁能力** — 可随时移除问题用户
 6. **群晖安全** — 建议使用只有 Download Station 权限的专用账号
 7. **PT 站风险** — Owner 需自行评估多人使用对分享率的影响
+8. **任务代际校验** — DS7 短令牌绑定查看者和活动绑定行，操作前重新读取任务并校验当前代际
+9. **删除默认保留文件** — 文件删除仅允许走已复核的 File Station 精确清单，禁止目录推测和通配清理
 
 ---
 
 ## 十四、后续可扩展功能
 
-1. **下载完成通知** — 轮询 Download Station，完成后推送消息
-2. **下载统计** — 基于 download_logs 表展示每人的下载统计
-3. **多站点搜索** — 支持配置多个 PT 站，聚合结果
-4. **Inline 模式** — 任意聊天中 @bot 搜索
-5. **影片信息增强** — TMDB/豆瓣海报和评分
-6. **自动分类存储** — 按影片类型存入不同目录
-7. **Web 管理面板** — 可视化配置和用户管理
+1. **下载统计** — 基于 download_logs 表展示每人的下载统计
+2. **多站点搜索** — 支持配置多个 PT 站，聚合结果
+3. **Inline 模式** — 任意聊天中 @bot 搜索
+4. **影片信息增强** — TMDB/豆瓣海报和评分
+5. **自动分类存储** — 按影片类型存入不同目录
+6. **Web 管理面板** — 可视化配置和用户管理

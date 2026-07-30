@@ -29,7 +29,7 @@ from bot.handlers.search import search_command, more_command, page_callback, dl_
 from bot.handlers.download import download_command
 from bot.handlers.start import start_command, apply_command, approval_callback, help_command
 from bot.handlers.status import (
-    status_command, cancel_command,
+    status_command, status_page_callback, ds_status_action_callback, cancel_command,
     delete_confirm_callback, delete_execute_callback, delete_cancel_callback,
 )
 from bot.handlers.admin import (
@@ -312,6 +312,8 @@ def main():
     app.add_handler(CallbackQueryHandler(ask_select_callback, pattern=r"^ask:"))
     app.add_handler(CallbackQueryHandler(dl_callback, pattern=r"^dl:"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern=r"^page:"))
+    app.add_handler(CallbackQueryHandler(status_page_callback, pattern=r"^stat:"))
+    app.add_handler(CallbackQueryHandler(ds_status_action_callback, pattern=r"^dst:"))
     app.add_handler(CallbackQueryHandler(delete_confirm_callback, pattern=r"^cdel:"))
     app.add_handler(CallbackQueryHandler(delete_execute_callback, pattern=r"^delok:"))
     app.add_handler(CallbackQueryHandler(delete_cancel_callback, pattern=r"^delno:"))

@@ -199,7 +199,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "直接发送 magnet/http 链接或 .torrent 文件 — 站外下载\n"
             + "/more — 下一页\n"
             + "/status — 查看下载任务\n"
-            + "/cancel 序号 — 移除任务\n"
+            + "/cancel — 前往状态页安全移除任务\n"
             + "\n<b>管理命令</b>\n\n"
             + "/users — 查看所有用户\n"
             + "/pending — 查看待审批用户\n"
@@ -226,7 +226,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             + "直接发送 magnet/http 链接或 .torrent 文件 — 站外下载\n"
             + "/more — 下一页\n"
             + "/status — 查看下载任务\n"
-            + "/cancel 序号 — 移除任务\n"
+            + "/cancel — 前往状态页安全移除任务\n"
         )
 
     await update.message.reply_text(text, parse_mode="HTML")

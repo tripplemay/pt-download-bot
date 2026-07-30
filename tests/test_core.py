@@ -1,6 +1,7 @@
 """Tests for bot.database, bot.config, and bot.utils modules."""
 
 import os
+import sqlite3
 
 import pytest
 
@@ -24,6 +25,59 @@ class TestDatabaseInit:
         tables = [row["name"] for row in cur.fetchall()]
         assert "users" in tables
         assert "download_logs" in tables
+
+    def test_migrates_existing_download_logs_activity(self, tmp_path):
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE download_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                torrent_title TEXT,
+                torrent_size TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                task_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO download_logs "
+            "(telegram_id, torrent_title, torrent_size, task_id) "
+            "VALUES (111, 'Legacy', '1 GB', 'legacy_1')"
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            columns = {
+                row["name"]: row
+                for row in db.conn.execute("PRAGMA table_info(download_logs)")
+            }
+            assert columns["task_active"]["notnull"] == 1
+            assert columns["task_active"]["dflt_value"] == "0"
+            row = db.conn.execute(
+                "SELECT task_active FROM download_logs WHERE task_id = 'legacy_1'"
+            ).fetchone()
+            assert row["task_active"] == 0
+            assert db.get_user_task_ids(111) == []
+        finally:
+            db.conn.close()
+
+    def test_creates_task_id_index(self, tmp_db):
+        indexes = {
+            row["name"]
+            for row in tmp_db.conn.execute("PRAGMA index_list(download_logs)")
+        }
+        assert "idx_download_logs_task_id" in indexes
+        indexed_columns = [
+            row["name"]
+            for row in tmp_db.conn.execute(
+                "PRAGMA index_info(idx_download_logs_task_id)"
+            )
+        ]
+        assert indexed_columns == ["task_id"]
 
 
 class TestInitOwner:
@@ -260,6 +314,7 @@ class TestDownloadLogsTaskId:
         cur.execute("PRAGMA table_info(download_logs)")
         columns = {row[1] for row in cur.fetchall()}
         assert "task_id" in columns
+        assert "task_active" in columns
 
     def test_log_download_with_task_id(self, tmp_db):
         tmp_db.log_download(111, "Movie.mkv", "14 GB", task_id="dbid_99")
@@ -288,6 +343,102 @@ class TestDownloadLogsTaskId:
 
     def test_get_user_task_ids_empty(self, tmp_db):
         assert tmp_db.get_user_task_ids(999) == []
+
+    def test_reused_task_id_deactivates_old_owner(self, tmp_db):
+        tmp_db.log_download(111, "Old", "1 GB", task_id="reused")
+        tmp_db.log_download(222, "New", "2 GB", task_id="reused")
+
+        rows = tmp_db.conn.execute(
+            "SELECT telegram_id, task_active FROM download_logs "
+            "WHERE task_id = 'reused' ORDER BY id"
+        ).fetchall()
+        assert [(row["telegram_id"], row["task_active"]) for row in rows] == [
+            (111, 0),
+            (222, 1),
+        ]
+        assert tmp_db.get_download_by_task_id("reused")["torrent_title"] == "New"
+        assert tmp_db.get_user_task_ids(111) == []
+        assert tmp_db.get_user_task_ids(222) == ["reused"]
+
+    def test_queries_latest_active_legacy_duplicate(self, tmp_db):
+        tmp_db.conn.execute(
+            "INSERT INTO download_logs "
+            "(telegram_id, torrent_title, torrent_size, task_id) "
+            "VALUES (111, 'Older', '1 GB', 'duplicate')"
+        )
+        tmp_db.conn.execute(
+            "INSERT INTO download_logs "
+            "(telegram_id, torrent_title, torrent_size, task_id) "
+            "VALUES (222, 'Latest', '2 GB', 'duplicate')"
+        )
+        tmp_db.conn.commit()
+
+        record = tmp_db.get_download_by_task_id("duplicate")
+        assert record["telegram_id"] == 222
+        assert record["torrent_title"] == "Latest"
+        assert tmp_db.get_user_task_ids(111) == []
+        assert tmp_db.get_user_task_ids(222) == ["duplicate"]
+
+    def test_user_owns_active_task(self, tmp_db):
+        tmp_db.log_download(111, "Movie", "1 GB", task_id="owned")
+        assert tmp_db.user_owns_active_task(111, "owned") is True
+        assert tmp_db.user_owns_active_task(222, "owned") is False
+        assert tmp_db.user_owns_active_task(111, "missing") is False
+
+    def test_user_ownership_follows_latest_active_record(self, tmp_db):
+        tmp_db.log_download(111, "Old", "1 GB", task_id="transferred")
+        tmp_db.log_download(222, "New", "1 GB", task_id="transferred")
+        assert tmp_db.user_owns_active_task(111, "transferred") is False
+        assert tmp_db.user_owns_active_task(222, "transferred") is True
+
+    def test_deactivate_task_removes_active_ownership(self, tmp_db):
+        tmp_db.log_download(111, "Movie", "1 GB", task_id="done")
+        assert tmp_db.deactivate_task("done") is True
+        assert tmp_db.deactivate_task("done") is False
+        assert tmp_db.deactivate_task("") is False
+        assert tmp_db.get_download_by_task_id("done") is None
+        assert tmp_db.get_user_task_ids(111) == []
+        assert tmp_db.user_owns_active_task(111, "done") is False
+
+    def test_binding_generation_prevents_deactivating_reused_task_id(self, tmp_db):
+        tmp_db.log_download(111, "Old", "1 GB", task_id="reused")
+        old_binding = tmp_db.get_active_task_binding("reused")
+        tmp_db.log_download(222, "New", "2 GB", task_id="reused")
+        new_binding = tmp_db.get_active_task_binding("reused")
+
+        assert old_binding["id"] != new_binding["id"]
+        assert new_binding["telegram_id"] == 222
+        assert not tmp_db.deactivate_task_binding("reused", old_binding["id"])
+        assert tmp_db.get_active_task_binding("reused") == new_binding
+        assert tmp_db.deactivate_task_binding("reused", new_binding["id"])
+        assert tmp_db.get_active_task_binding("reused") is None
+
+    def test_deactivate_all_tasks(self, tmp_db):
+        tmp_db.log_download(111, "One", "1 GB", task_id="task_1")
+        tmp_db.log_download(222, "Two", "2 GB", task_id="task_2")
+
+        assert tmp_db.deactivate_all_tasks() == 2
+        assert tmp_db.get_active_task_ids() == []
+        assert tmp_db.deactivate_all_tasks() == 0
+
+    def test_get_active_task_ids(self, tmp_db):
+        tmp_db.log_download(111, "One", "1 GB", task_id="task_1")
+        tmp_db.log_download(222, "Two", "2 GB", task_id="task_2")
+        tmp_db.log_download(111, "No ID", "3 GB")
+        tmp_db.log_download(111, "Blank ID", "4 GB", task_id="")
+        tmp_db.deactivate_task("task_1")
+
+        assert tmp_db.get_active_task_ids() == ["task_2"]
+
+    def test_get_active_task_ids_deduplicates_legacy_rows(self, tmp_db):
+        tmp_db.conn.executemany(
+            "INSERT INTO download_logs "
+            "(telegram_id, torrent_title, torrent_size, task_id) "
+            "VALUES (?, ?, '1 GB', 'duplicate')",
+            [(111, "Older"), (222, "Latest")],
+        )
+        tmp_db.conn.commit()
+        assert tmp_db.get_active_task_ids() == ["duplicate"]
 
 
 # =====================================================================

@@ -52,6 +52,8 @@ class Database:
                 telegram_id   INTEGER NOT NULL,
                 torrent_title TEXT,
                 torrent_size  TEXT,
+                task_id       TEXT,
+                task_active   INTEGER NOT NULL DEFAULT 1,
                 created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -72,7 +74,16 @@ class Database:
         columns = {row[1] for row in cur.fetchall()}
         if "task_id" not in columns:
             cur.execute("ALTER TABLE download_logs ADD COLUMN task_id TEXT")
-            self.conn.commit()
+        if "task_active" not in columns:
+            cur.execute(
+                "ALTER TABLE download_logs "
+                "ADD COLUMN task_active INTEGER NOT NULL DEFAULT 0"
+            )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_download_logs_task_id "
+            "ON download_logs(task_id)"
+        )
+        self.conn.commit()
 
     # ------------------------------------------------------------------
     # helpers
@@ -195,22 +206,31 @@ class Database:
 
     def log_download(self, telegram_id: int, title: str, size: str,
                      task_id: str = None):
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO download_logs (telegram_id, torrent_title, torrent_size, task_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            (telegram_id, title, size, task_id),
-        )
-        self.conn.commit()
+        with self.conn:
+            if task_id:
+                self.conn.execute(
+                    "UPDATE download_logs SET task_active = 0 "
+                    "WHERE task_id = ? AND task_active = 1",
+                    (task_id,),
+                )
+            self.conn.execute(
+                """
+                INSERT INTO download_logs (
+                    telegram_id, torrent_title, torrent_size, task_id, task_active
+                )
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (telegram_id, title, size, task_id),
+            )
 
     def get_download_by_task_id(self, task_id: str) -> Optional[dict]:
         """根据 task_id 查找下载记录。"""
         cur = self.conn.cursor()
         cur.execute(
             "SELECT telegram_id, torrent_title, torrent_size, created_at "
-            "FROM download_logs WHERE task_id = ?",
+            "FROM download_logs "
+            "WHERE task_id = ? AND task_active = 1 "
+            "ORDER BY id DESC LIMIT 1",
             (task_id,),
         )
         row = cur.fetchone()
@@ -224,12 +244,108 @@ class Database:
         return None
 
     def get_user_task_ids(self, telegram_id: int) -> List[str]:
-        """获取某用户所有有 task_id 的下载记录的 task_id 列表。"""
+        """获取某用户当前归属的活动任务 ID。"""
         cur = self.conn.cursor()
         cur.execute(
-            "SELECT task_id FROM download_logs "
-            "WHERE telegram_id = ? AND task_id IS NOT NULL AND task_id != ''",
+            """
+            SELECT logs.task_id
+            FROM download_logs AS logs
+            WHERE logs.telegram_id = ?
+              AND logs.task_active = 1
+              AND logs.task_id IS NOT NULL
+              AND logs.task_id != ''
+              AND logs.id = (
+                  SELECT MAX(latest.id)
+                  FROM download_logs AS latest
+                  WHERE latest.task_id = logs.task_id
+                    AND latest.task_active = 1
+              )
+            ORDER BY logs.id
+            """,
             (telegram_id,),
+        )
+        return [row["task_id"] for row in cur.fetchall()]
+
+    def user_owns_active_task(self, telegram_id: int, task_id: str) -> bool:
+        """判断指定活动任务的最新归属是否为该用户。"""
+        binding = self.get_active_task_binding(task_id)
+        return binding is not None and binding["telegram_id"] == telegram_id
+
+    def get_active_task_binding(self, task_id: str) -> Optional[dict]:
+        """返回任务当前绑定的数据库代际与用户。"""
+        if not task_id:
+            return None
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT id, telegram_id, task_id
+            FROM download_logs
+            WHERE task_id = ? AND task_active = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (task_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "telegram_id": row["telegram_id"],
+            "task_id": row["task_id"],
+        }
+
+    def deactivate_task_binding(self, task_id: str, binding_id: int) -> bool:
+        """仅在任务仍属于指定绑定代际时将其失活。"""
+        if not task_id or binding_id is None:
+            return False
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE download_logs SET task_active = 0 "
+            "WHERE id = ? AND task_id = ? AND task_active = 1",
+            (binding_id, task_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def deactivate_task(self, task_id: str) -> bool:
+        """将指定 task_id 的所有活动归属标记为失活。"""
+        if not task_id:
+            return False
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE download_logs SET task_active = 0 "
+            "WHERE task_id = ? AND task_active = 1",
+            (task_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def deactivate_all_tasks(self) -> int:
+        """切换下载客户端时失活全部旧客户端任务绑定。"""
+        cur = self.conn.cursor()
+        cur.execute("UPDATE download_logs SET task_active = 0 WHERE task_active = 1")
+        self.conn.commit()
+        return cur.rowcount
+
+    def get_active_task_ids(self) -> List[str]:
+        """获取所有当前活动任务 ID，每个 task_id 仅返回最新归属。"""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT logs.task_id
+            FROM download_logs AS logs
+            WHERE logs.task_active = 1
+              AND logs.task_id IS NOT NULL
+              AND logs.task_id != ''
+              AND logs.id = (
+                  SELECT MAX(latest.id)
+                  FROM download_logs AS latest
+                  WHERE latest.task_id = logs.task_id
+                    AND latest.task_active = 1
+              )
+            ORDER BY logs.id
+            """
         )
         return [row["task_id"] for row in cur.fetchall()]
 

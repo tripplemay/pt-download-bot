@@ -131,43 +131,64 @@ class TestFormatEta:
         assert "天" in result
 
 
-class TestBuildDeleteButtons:
-    """Test _build_delete_buttons."""
+class TestDS7StatusMapping:
 
-    def test_builds_buttons_for_tasks(self):
-        from bot.handlers.status import _build_delete_buttons
+    @pytest.mark.parametrize(
+        ("code", "state", "label"),
+        [
+            (1, "waiting", "等待"),
+            (2, "downloading", "下载"),
+            (3, "paused", "暂停"),
+            (4, "processing", "处理"),
+            (5, "completed", "完成"),
+            (6, "processing", "校验"),
+            (7, "completed", "做种"),
+            (8, "completed", "做种"),
+            (9, "waiting", "等待"),
+            (10, "processing", "解压"),
+            (11, "waiting", "预处理"),
+            (12, "waiting", "预处理"),
+            (13, "processing", "收尾"),
+            (14, "processing", "后处理"),
+            (15, "waiting", "验证码"),
+            (105, "error", "磁盘空间不足"),
+            (113, "error", "重复"),
+            (123, "error", "无效"),
+            (999, "error", "999"),
+            (99, "unknown", "99"),
+            (None, "unknown", "未知"),
+        ],
+    )
+    def test_status_mapping(self, code, state, label):
+        from bot.clients.download_station import get_ds7_status_info
 
-        tasks = [
-            {"id": "task1", "title": "Movie A"},
-            {"id": "task2", "title": "Movie B"},
-        ]
-        markup = _build_delete_buttons(tasks, 111)
-        assert markup is not None
-        # Two rows, one button each
-        assert len(markup.inline_keyboard) == 2
-        assert "cdel:111:task1" in markup.inline_keyboard[0][0].callback_data
-        assert "cdel:111:task2" in markup.inline_keyboard[1][0].callback_data
+        actual_state, actual_label = get_ds7_status_info(code)
+        assert actual_state == state
+        assert label in actual_label
 
-    def test_long_name_truncated(self):
-        from bot.handlers.status import _build_delete_buttons
+    def test_task_buttons_use_safe_action(self):
+        from bot.handlers.status import _task_action_button
 
-        tasks = [{"id": "t1", "title": "A" * 50}]
-        markup = _build_delete_buttons(tasks, 111)
-        btn_text = markup.inline_keyboard[0][0].text
-        assert "\u2026" in btn_text
+        active = _task_action_button({"id": "t1", "title": "Active", "status": 2}, 1, 111)
+        completed = _task_action_button({"id": "t2", "title": "Done", "status": 8}, 2, 111)
 
-    def test_no_task_id_skipped(self):
-        from bot.handlers.status import _build_delete_buttons
+        assert active.callback_data == "cdel:111:t1:cancel"
+        assert completed.callback_data == "cdel:111:t2:keep"
 
-        tasks = [{"title": "No ID task"}]
-        markup = _build_delete_buttons(tasks, 111)
-        assert markup is None
+    def test_task_button_skips_overlong_callback(self):
+        from bot.handlers.status import _task_action_button
 
-    def test_empty_tasks(self):
-        from bot.handlers.status import _build_delete_buttons
+        task = {"id": "x" * 60, "title": "Too long", "status": 2}
+        assert _task_action_button(task, 1, 111) is None
 
-        markup = _build_delete_buttons([], 111)
-        assert markup is None
+    def test_extract_progress_is_displayed(self):
+        from bot.handlers.status import _format_task_detail
+
+        task = {
+            "id": "extract", "title": "Archive", "status": 10,
+            "status_extra": {"extract_progress": 42},
+        }
+        assert "解压中 42%" in _format_task_detail(task, 1)
 
 
 class TestStatusCommandUserFiltering:
@@ -231,50 +252,183 @@ class TestStatusCommandUserFiltering:
         assert "还没有" in text or "没有" in text
 
 
+class TestStatusPagination:
+
+    async def test_default_hides_completed_task_details(self, db_with_users):
+        from bot.handlers.status import status_command
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "active", "title": "Active Movie", "status": 2},
+            {"id": "done", "title": "Finished Movie", "status": 5},
+            {"id": "seed", "title": "Seeding Movie", "status": 8},
+        ])
+        update = make_update(user_id=111)
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_command(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        markup = update.message.reply_text.call_args[1]["reply_markup"]
+        assert "Active Movie" in text
+        assert "Finished Movie" not in text
+        assert "Seeding Movie" not in text
+        assert "完成/做种 2" in text
+        assert any(
+            "completed" in button.callback_data
+            for row in markup.inline_keyboard for button in row
+        )
+
+    async def test_completed_view_callback(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "active", "title": "Active Movie", "status": 2},
+            {"id": "seed", "title": "Seeding Movie", "status": 8},
+        ])
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:completed:0",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "Seeding Movie" in text
+        assert "Active Movie" not in text
+        assert "做种中" in text
+
+    async def test_second_page_uses_global_numbers(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        tasks = [
+            {"id": f"t{i}", "title": f"Task {i}", "status": 2}
+            for i in range(1, 11)
+        ]
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=tasks)
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:active:1",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "9. Task 9" in text
+        assert "10. Task 10" in text
+        assert "1. Task 1" not in text
+
+    async def test_non_owner_cannot_forge_all_mode(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        db_with_users.log_download(333, "Mine", "1 GB", task_id="mine")
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "mine", "title": "Mine", "status": 2},
+            {"id": "other", "title": "Other", "status": 2},
+        ])
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="stat:333:all:active:0",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        markup = update.callback_query.edit_message_text.call_args[1]["reply_markup"]
+        assert "Mine" in text
+        assert "Other" not in text
+        assert all(
+            ":mine:" in button.callback_data
+            for row in markup.inline_keyboard for button in row
+            if button.callback_data.startswith("stat:")
+        )
+
+    async def test_refresh_failure_keeps_existing_message(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(side_effect=Exception("offline"))
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:active:0",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        update.callback_query.answer.assert_awaited_once_with()
+        assert "刷新失败" in context.bot.send_message.call_args.kwargs["text"]
+        update.callback_query.edit_message_text.assert_not_awaited()
+
+    async def test_refresh_answers_before_loading_tasks(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:active:0",
+        )
+
+        async def get_tasks():
+            update.callback_query.answer.assert_awaited_once_with()
+            return [{"id": "t1", "title": "Task", "status": 2}]
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(side_effect=get_tasks)
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        update.callback_query.edit_message_text.assert_awaited_once()
+
+    async def test_page_is_clamped_after_tasks_disappear(self, db_with_users):
+        from bot.handlers.status import status_page_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Only Task", "status": 2},
+        ])
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:active:9",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "1. Only Task" in text
+        assert "第 10" not in text
+
+    async def test_unchanged_refresh_is_ignored(self, db_with_users):
+        from telegram.error import BadRequest
+        from bot.handlers.status import status_page_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Task", "status": 2},
+        ])
+        update = make_update(
+            user_id=111, is_callback=True,
+            callback_data="stat:111:all:active:0",
+        )
+        update.callback_query.edit_message_text = AsyncMock(
+            side_effect=BadRequest("Message is not modified")
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await status_page_callback(update, context)
+
+        update.callback_query.answer.assert_awaited_once()
+
+
 class TestCancelCommand:
-    """Test cancel_command."""
-
-    async def test_cancel_no_args(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, args=[])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "用法" in text
-
-    async def test_cancel_invalid_index_not_number(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, args=["abc"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "有效" in text
-
-    async def test_cancel_invalid_index_zero(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, args=["0"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "有效" in text
-
-    async def test_cancel_invalid_index_negative(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, args=["-1"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "有效" in text
-
-    async def test_cancel_no_dl_client(self, db_with_users):
+    async def test_redirects_to_stable_status_buttons(self, db_with_users):
         from bot.handlers.status import cancel_command
 
         update = make_update(user_id=111)
@@ -282,128 +436,77 @@ class TestCancelCommand:
         await cancel_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "未配置" in text or "尚未配置" in text
-
-    async def test_cancel_get_tasks_error(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(side_effect=Exception("fail"))
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["1"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "失败" in text
-
-    async def test_cancel_index_out_of_range(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "Task1", "id": "t1", "status": 2},
-        ])
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["5"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "超出范围" in text
-
-    async def test_cancel_task_no_id(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "No ID Task", "status": 2},
-        ])
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["1"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "无法删除" in text
-
-    async def test_cancel_valid_shows_confirmation(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "My Movie", "id": "t1", "status": 2},
-        ])
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["1"])
-        await cancel_command(update, context)
-
-        call_kwargs = update.message.reply_text.call_args
-        text = call_kwargs[0][0]
-        assert "确认删除" in text
-        assert "My Movie" in text
-        # Check keyboard has confirm and cancel buttons
-        markup = call_kwargs[1]["reply_markup"]
-        buttons = markup.inline_keyboard[0]
-        assert any("delok" in b.callback_data for b in buttons)
-        assert any("delno" in b.callback_data for b in buttons)
-
-    async def test_cancel_long_name_truncated(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "A" * 100, "id": "t1", "status": 2},
-        ])
-
-        update = make_update(user_id=111)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["1"])
-        await cancel_command(update, context)
-
-        text = update.message.reply_text.call_args[0][0]
-        assert "\u2026" in text
-
-    async def test_cancel_user_sees_only_own_tasks(self, db_with_users):
-        from bot.handlers.status import cancel_command
-
-        db_with_users.log_download(333, "User Task", "1 GB", task_id="ut1")
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"title": "User Task", "id": "ut1", "status": 2},
-            {"title": "Owner Task", "id": "ot1", "status": 2},
-        ])
-
-        update = make_update(user_id=333)
-        context = make_context(db=db_with_users, dl_client=dl_client, args=["1"])
-        await cancel_command(update, context)
-
-        # Should show confirmation for user's task
-        text = update.message.reply_text.call_args[0][0]
-        assert "User Task" in text
+        assert "/status" in text
+        assert "误删" in text
 
 
 class TestDeleteConfirmCallback:
-    """Test delete_confirm_callback (cdel:uid:task_id)."""
-
-    async def test_valid_confirm(self, db_with_users):
+    async def test_active_task_confirms_cancel(self, db_with_users):
         from bot.handlers.status import delete_confirm_callback
 
+        db_with_users.log_download(333, "Movie ABC", "1 GB", task_id="t1")
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[
-            {"id": "t1", "title": "Movie ABC"},
+            {"id": "t1", "title": "Movie ABC", "status": 2},
         ])
 
-        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:t1")
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="cdel:333:t1:cancel",
+        )
+
+        async def get_tasks():
+            update.callback_query.answer.assert_awaited_once_with()
+            return [{"id": "t1", "title": "Movie ABC", "status": 2}]
+
+        dl_client.get_tasks = AsyncMock(side_effect=get_tasks)
         context = make_context(db=db_with_users, dl_client=dl_client)
         await delete_confirm_callback(update, context)
 
         query = update.callback_query
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
-        assert "确认删除" in call_args[0][0]
-        assert "Movie ABC" in call_args[0][0]
+        text = query.edit_message_text.call_args[0][0]
+        keyboard = query.edit_message_text.call_args[1]["reply_markup"]
+        assert "取消下载任务" in text
+        assert "Movie ABC" in text
+        assert keyboard.inline_keyboard[0][0].callback_data == "delok:333:t1:cancel"
+
+    async def test_completed_task_forces_keep_files(self, db_with_users):
+        from bot.handlers.status import delete_confirm_callback
+
+        db_with_users.log_download(333, "Done", "1 GB", task_id="t1")
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Done", "status": 8},
+        ])
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="cdel:333:t1:cancel",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await delete_confirm_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        keyboard = update.callback_query.edit_message_text.call_args[1]["reply_markup"]
+        assert "保留" in text
+        assert keyboard.inline_keyboard[0][0].callback_data == "delok:333:t1:keep"
+
+    async def test_finished_task_uses_completed_wording(self, db_with_users):
+        from bot.handlers.status import delete_confirm_callback
+
+        db_with_users.log_download(333, "Done", "1 GB", task_id="t1")
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Done", "status": 5},
+        ])
+        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:t1:keep")
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await delete_confirm_callback(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "移除已完成任务" in text
+        assert "停止做种" not in text
 
     async def test_unauthorized_user(self, db_with_users):
         from bot.handlers.status import delete_confirm_callback
@@ -413,9 +516,8 @@ class TestDeleteConfirmCallback:
         await delete_confirm_callback(update, context)
 
         query = update.callback_query
-        # First call is answer(), second is answer() with alert
-        assert query.answer.call_count >= 2
-        last_call = query.answer.call_args_list[-1]
+        assert query.answer.call_count == 1
+        last_call = query.answer.call_args
         assert "无权限" in last_call[0][0]
 
     async def test_wrong_user(self, db_with_users):
@@ -451,99 +553,112 @@ class TestDeleteConfirmCallback:
         last_call = query.answer.call_args_list[-1]
         assert "无效" in last_call[0][0]
 
-    async def test_task_not_found_uses_task_id_as_name(self, db_with_users):
+    async def test_rejects_task_not_owned_by_user(self, db_with_users):
         from bot.handlers.status import delete_confirm_callback
 
+        dl_client = AsyncMock()
+        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:other")
+        context = make_context(db=db_with_users, dl_client=dl_client)
+        await delete_confirm_callback(update, context)
+
+        assert "无权限" in update.callback_query.answer.call_args[0][0]
+        dl_client.get_tasks.assert_not_awaited()
+
+    async def test_task_not_found_reports_notice(self, db_with_users):
+        from bot.handlers.status import delete_confirm_callback
+
+        db_with_users.log_download(333, "Gone", "1 GB", task_id="gone")
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[])
-
-        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:unknown_id")
+        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:gone")
         context = make_context(db=db_with_users, dl_client=dl_client)
         await delete_confirm_callback(update, context)
 
-        query = update.callback_query
-        call_args = query.edit_message_text.call_args
-        assert "unknown_id" in call_args[0][0]
-
-    async def test_no_dl_client_uses_task_id_as_name(self, db_with_users):
-        from bot.handlers.status import delete_confirm_callback
-
-        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:t1")
-        context = make_context(db=db_with_users)
-        await delete_confirm_callback(update, context)
-
-        query = update.callback_query
-        call_args = query.edit_message_text.call_args
-        assert "t1" in call_args[0][0]
-
-    async def test_get_tasks_exception_uses_task_id(self, db_with_users):
-        from bot.handlers.status import delete_confirm_callback
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(side_effect=Exception("fail"))
-
-        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:t1")
-        context = make_context(db=db_with_users, dl_client=dl_client)
-        await delete_confirm_callback(update, context)
-
-        query = update.callback_query
-        call_args = query.edit_message_text.call_args
-        # Falls back to task_id as name
-        assert "t1" in call_args[0][0]
-
-    async def test_long_task_name_truncated(self, db_with_users):
-        from bot.handlers.status import delete_confirm_callback
-
-        dl_client = AsyncMock()
-        dl_client.get_tasks = AsyncMock(return_value=[
-            {"id": "t1", "title": "A" * 100},
-        ])
-
-        update = make_update(user_id=333, is_callback=True, callback_data="cdel:333:t1")
-        context = make_context(db=db_with_users, dl_client=dl_client)
-        await delete_confirm_callback(update, context)
-
-        query = update.callback_query
-        text = query.edit_message_text.call_args[0][0]
-        assert "\u2026" in text
+        update.callback_query.answer.assert_awaited_once_with()
+        assert "不存在" in context.bot.send_message.call_args.kwargs["text"]
+        update.callback_query.edit_message_text.assert_not_awaited()
 
 
 class TestDeleteExecuteCallback:
-    """Test delete_execute_callback (delok:uid:task_id)."""
-
-    async def test_success(self, db_with_users):
+    async def test_active_cancel_never_uses_filestation_cleanup(self, db_with_users):
         from bot.handlers.status import delete_execute_callback
 
         dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Task", "status": 2},
+        ])
         dl_client.delete_task = AsyncMock(return_value=True)
-
-        update = make_update(user_id=333, is_callback=True, callback_data="delok:333:t1")
-        context = make_context(db=db_with_users, dl_client=dl_client)
-
-        # User 333 needs to own the task
         db_with_users.log_download(333, "Task", "1 GB", task_id="t1")
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="delok:333:t1:cancel",
+        )
+
+        async def get_tasks():
+            update.callback_query.answer.assert_awaited_once_with()
+            return [{"id": "t1", "title": "Task", "status": 2}]
+
+        dl_client.get_tasks = AsyncMock(side_effect=get_tasks)
+        context = make_context(db=db_with_users, dl_client=dl_client)
 
         await delete_execute_callback(update, context)
 
-        query = update.callback_query
-        query.edit_message_text.assert_called_once()
-        assert "已移除" in query.edit_message_text.call_args[0][0]
+        dl_client.delete_task.assert_awaited_once_with("t1", delete_files=False)
+        assert "已取消" in update.callback_query.edit_message_text.call_args[0][0]
 
-    async def test_failure(self, db_with_users):
+    async def test_completed_task_keeps_files(self, db_with_users):
         from bot.handlers.status import delete_execute_callback
 
         dl_client = AsyncMock()
-        dl_client.delete_task = AsyncMock(return_value=False)
-
-        update = make_update(user_id=333, is_callback=True, callback_data="delok:333:t1")
-        context = make_context(db=db_with_users, dl_client=dl_client)
-
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Task", "status": 8},
+        ])
+        dl_client.delete_task = AsyncMock(return_value=True)
         db_with_users.log_download(333, "Task", "1 GB", task_id="t1")
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="delok:333:t1:keep",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
 
         await delete_execute_callback(update, context)
 
-        query = update.callback_query
-        assert "失败" in query.edit_message_text.call_args[0][0]
+        dl_client.delete_task.assert_awaited_once_with("t1", delete_files=False)
+        assert "文件已保留" in update.callback_query.edit_message_text.call_args[0][0]
+
+    async def test_completion_race_downgrades_to_keep(self, db_with_users):
+        from bot.handlers.status import delete_execute_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[
+            {"id": "t1", "title": "Task", "status": 5},
+        ])
+        dl_client.delete_task = AsyncMock(return_value=True)
+        db_with_users.log_download(333, "Task", "1 GB", task_id="t1")
+        update = make_update(
+            user_id=333, is_callback=True,
+            callback_data="delok:333:t1:cancel",
+        )
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await delete_execute_callback(update, context)
+
+        dl_client.delete_task.assert_awaited_once_with("t1", delete_files=False)
+        assert "确认期间已完成" in update.callback_query.edit_message_text.call_args[0][0]
+
+    async def test_delete_failure(self, db_with_users):
+        from bot.handlers.status import delete_execute_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[{"id": "t1", "status": 2}])
+        dl_client.delete_task = AsyncMock(return_value=False)
+        db_with_users.log_download(333, "Task", "1 GB", task_id="t1")
+        update = make_update(user_id=333, is_callback=True, callback_data="delok:333:t1")
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await delete_execute_callback(update, context)
+
+        assert "失败" in update.callback_query.edit_message_text.call_args[0][0]
 
     async def test_unauthorized_user(self, db_with_users):
         from bot.handlers.status import delete_execute_callback
@@ -574,6 +689,7 @@ class TestDeleteExecuteCallback:
         from bot.handlers.status import delete_execute_callback
 
         dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[{"id": "t1", "status": 2}])
         dl_client.delete_task = AsyncMock(return_value=True)
 
         # Owner (111) deletes task belonging to user 333
@@ -582,7 +698,7 @@ class TestDeleteExecuteCallback:
         await delete_execute_callback(update, context)
 
         query = update.callback_query
-        assert "已移除" in query.edit_message_text.call_args[0][0]
+        assert "已取消" in query.edit_message_text.call_args[0][0]
 
     async def test_no_dl_client(self, db_with_users):
         from bot.handlers.status import delete_execute_callback
@@ -594,6 +710,20 @@ class TestDeleteExecuteCallback:
 
         query = update.callback_query
         assert "未配置" in query.edit_message_text.call_args[0][0]
+
+    async def test_missing_task_does_not_delete(self, db_with_users):
+        from bot.handlers.status import delete_execute_callback
+
+        dl_client = AsyncMock()
+        dl_client.get_tasks = AsyncMock(return_value=[])
+        db_with_users.log_download(333, "Gone", "1 GB", task_id="gone")
+        update = make_update(user_id=333, is_callback=True, callback_data="delok:333:gone")
+        context = make_context(db=db_with_users, dl_client=dl_client)
+
+        await delete_execute_callback(update, context)
+
+        assert "不存在" in update.callback_query.edit_message_text.call_args[0][0]
+        dl_client.delete_task.assert_not_awaited()
 
     async def test_invalid_data_format(self, db_with_users):
         from bot.handlers.status import delete_execute_callback
@@ -645,3 +775,14 @@ class TestDeleteCancelCallback:
         query = update.callback_query
         query.answer.assert_called_once()
         query.edit_message_text.assert_called_once_with("已取消。")
+
+    async def test_other_user_cannot_cancel(self, db_with_users):
+        from bot.handlers.status import delete_cancel_callback
+
+        update = make_update(user_id=333, is_callback=True, callback_data="delno:111")
+        context = make_context(db=db_with_users)
+
+        await delete_cancel_callback(update, context)
+
+        assert "不是你的" in update.callback_query.answer.call_args[0][0]
+        update.callback_query.edit_message_text.assert_not_awaited()

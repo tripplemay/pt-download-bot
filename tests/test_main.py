@@ -91,7 +91,7 @@ class TestStatusCommand:
         await status_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "2 个" in text
+        assert "下载 2" in text
         assert "Movie.2024.1080p" in text
 
     async def test_status_no_tasks(self, db_with_users):
@@ -142,7 +142,8 @@ class TestStatusCommand:
         await status_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "还有" in text
+        assert "第 1/4 页" in text
+        assert "Task 8" not in text
 
     async def test_status_long_task_name_truncated(self, db_with_users):
         from bot.handlers.status import status_command
@@ -165,7 +166,8 @@ class TestStatusCommand:
         dl_client = AsyncMock()
         dl_client.get_tasks = AsyncMock(return_value=[
             {"title": "Downloading", "status": 2, "size": 1000, "additional": {"transfer": {"size_downloaded": 500, "speed_download": 100}}},
-            {"title": "Paused", "status": 5, "size": 2000, "additional": {"transfer": {"size_downloaded": 1000, "speed_download": 0}}},
+            {"title": "Paused", "status": 3, "size": 2000, "additional": {"transfer": {"size_downloaded": 1000, "speed_download": 0}}},
+            {"title": "Finished", "status": 5},
             {"title": "Seeding1", "status": 8},
             {"title": "Seeding2", "status": 8},
         ])
@@ -175,9 +177,12 @@ class TestStatusCommand:
         await status_command(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "📥 下载中" in text
-        assert "⏸ 暂停" in text
-        assert "🌱 做种 (2 个)" in text
+        assert "下载 1" in text
+        assert "暂停 1" in text
+        assert "完成/做种 3" in text
+        assert "Paused" in text
+        assert "Finished" not in text
+        assert "Seeding1" not in text
 
     async def test_status_user_sees_only_own_tasks(self, db_with_users):
         from bot.handlers.status import status_command

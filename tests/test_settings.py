@@ -169,6 +169,64 @@ class TestSetPasskeyCommand:
 
         context.bot.delete_message.assert_called_once()
 
+    async def test_changed_client_clears_old_task_namespace(self, db_with_owner):
+        db_with_owner.set_setting("dl_client_type", "download_station")
+        db_with_owner.set_setting("dl_client_host", "http://old-nas:5000")
+        db_with_owner.set_setting("dl_client_username", "admin")
+        db_with_owner.log_download(111, "Old", "1 GB", task_id="dbid_1")
+        update = make_update(user_id=111)
+        update.effective_chat = MagicMock(id=111)
+        old_client = AsyncMock()
+        context = make_context(
+            db=db_with_owner,
+            dl_client=old_client,
+            args=["http://new-nas:5000", "admin", "new-password"],
+        )
+        context.bot.delete_message = AsyncMock()
+        context.bot.send_message = AsyncMock(return_value=AsyncMock())
+        context.bot_data["status_token_registry"] = object()
+        context.bot_data["_task_snapshot"] = {"dbid_1": 2}
+        context.bot_data["_completion_notification_pending"] = {"dbid_1": {111: "x"}}
+        new_client = AsyncMock()
+        new_client.test_connection.return_value = True
+
+        with patch("bot.main.init_dl_client", return_value=new_client):
+            await setds_command(update, context)
+
+        assert db_with_owner.get_active_task_ids() == []
+        assert "status_token_registry" not in context.bot_data
+        assert "_task_snapshot" not in context.bot_data
+        assert "_completion_notification_pending" not in context.bot_data
+        old_client.close.assert_awaited_once_with()
+        assert context.bot_data["dl_client"] is new_client
+
+    async def test_same_client_identity_keeps_task_namespace(self, db_with_owner):
+        db_with_owner.set_setting("dl_client_type", "download_station")
+        db_with_owner.set_setting("dl_client_host", "http://nas:5000")
+        db_with_owner.set_setting("dl_client_username", "admin")
+        db_with_owner.log_download(111, "Current", "1 GB", task_id="dbid_2")
+        update = make_update(user_id=111)
+        update.effective_chat = MagicMock(id=111)
+        old_client = AsyncMock()
+        context = make_context(
+            db=db_with_owner,
+            dl_client=old_client,
+            args=["http://nas:5000/", "admin", "rotated-password"],
+        )
+        context.bot.delete_message = AsyncMock()
+        context.bot.send_message = AsyncMock(return_value=AsyncMock())
+        registry = object()
+        context.bot_data["status_token_registry"] = registry
+        new_client = AsyncMock()
+        new_client.test_connection.return_value = True
+
+        with patch("bot.main.init_dl_client", return_value=new_client):
+            await setds_command(update, context)
+
+        assert db_with_owner.get_active_task_ids() == ["dbid_2"]
+        assert context.bot_data["status_token_registry"] is registry
+        old_client.close.assert_awaited_once_with()
+
 
 # ===================================================================
 # /settmdb

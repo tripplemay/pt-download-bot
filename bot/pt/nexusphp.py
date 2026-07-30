@@ -391,7 +391,7 @@ class NexusPHPSite(PTSiteBase):
     # ------------------------------------------------------------------
     # 下载种子
     # ------------------------------------------------------------------
-    async def download_torrent(self, torrent_url: str) -> bytes:
+    async def download_torrent(self, torrent_url: str, cookie: str = "") -> bytes:
         """下载 .torrent 文件，返回原始字节。校验域名防止 passkey 泄露。"""
         url_host = urlparse(torrent_url).netloc
         base_host = urlparse(self.base_url).netloc
@@ -399,9 +399,15 @@ class NexusPHPSite(PTSiteBase):
             raise ValueError(
                 f"torrent URL 域名 ({url_host}) 与 PT 站 ({base_host}) 不匹配，拒绝下载"
             )
-        resp = await self._get(torrent_url)
+        headers = {"Cookie": cookie} if cookie else None
+        resp = await self._get(torrent_url, headers=headers)
         resp.raise_for_status()
-        return resp.content
+        content = resp.content
+        if "login.php" in str(resp.url) or not content.lstrip().startswith(b"d"):
+            raise ValueError(
+                "PT 站返回的不是有效 .torrent 文件，Cookie 或 Passkey 可能已失效"
+            )
+        return content
 
     # ------------------------------------------------------------------
     # 连接测试
