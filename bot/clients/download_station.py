@@ -339,6 +339,47 @@ def _remap_file_manifest(
     )
 
 
+def _prefix_file_manifest(
+    manifest: DS7FileManifest,
+    component: str,
+) -> DS7FileManifest:
+    """Create a candidate manifest rooted below a task-named directory."""
+    if (
+        not component
+        or component in (".", "..")
+        or "/" in component
+        or "\\" in component
+        or "\x00" in component
+    ):
+        raise ValueError("任务目录名无效")
+    destination = f"{manifest.destination}/{component}"
+    prefix = manifest.destination + "/"
+    real_destination = ""
+    if manifest.real_paths:
+        first_path = manifest.paths[0]
+        first_real_path = manifest.real_paths[0]
+        relative = first_path[len(manifest.destination):]
+        if not relative or not first_real_path.endswith(relative):
+            raise ValueError("文件清单真实路径无法映射任务目录")
+        real_destination = first_real_path[:-len(relative)].rstrip("/")
+        if not real_destination.startswith("/"):
+            raise ValueError("文件清单真实下载目录无效")
+    return _create_ds7_file_manifest(
+        task_id=manifest.task_id,
+        destination=destination,
+        paths=tuple(
+            destination + "/" + path[len(prefix):]
+            for path in manifest.paths
+        ),
+        total_size=manifest.total_size,
+        real_paths=tuple(
+            real_destination + "/" + component + "/" + path[len(prefix):]
+            for path in manifest.paths
+        ) if real_destination else (),
+        file_sizes=manifest.file_sizes,
+    )
+
+
 @dataclass
 class _APIProfile:
     """API 自检发现的接口配置"""
@@ -1122,6 +1163,8 @@ class DownloadStationClient(DownloadClientBase):
             }
             data = await self._file_station_request("GET", params=params)
             files = data.get("data", {}).get("files", [])
+            if any(item.get("code") not in (None, 0) for item in files):
+                raise ValueError("File Station 无法确认全部下载文件")
             returned = {
                 str(item.get("path"))
                 for item in files
@@ -1153,8 +1196,24 @@ class DownloadStationClient(DownloadClientBase):
         items = await self.get_bt_task_files(str(task.get("id") or ""))
         manifest = build_ds7_file_manifest(task, items)
         manifest = await self._resolve_file_station_manifest(manifest)
-        await self._verify_file_manifest_paths(manifest)
-        return manifest
+        candidates = [manifest]
+        title = str(task.get("title") or "").strip()
+        if title:
+            try:
+                candidates.append(_prefix_file_manifest(manifest, title))
+            except ValueError:
+                pass
+
+        verified = []
+        for candidate in candidates:
+            try:
+                await self._verify_file_manifest_paths(candidate)
+            except Exception:
+                continue
+            verified.append(candidate)
+        if len(verified) != 1:
+            raise ValueError("无法唯一核实下载文件位置")
+        return verified[0]
 
     async def delete_file_manifest(
         self,

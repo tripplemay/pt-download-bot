@@ -915,6 +915,43 @@ class TestDownloadStationClient:
         assert list_share["method"] == "list_share"
         assert list_share["onlywritable"] == "true"
 
+    async def test_prepare_manifest_accepts_task_title_directory(self, ds_client):
+        task = {
+            "id": "bt-1",
+            "title": "Release.Name",
+            "type": "bt",
+            "additional": {"detail": {"destination": "MOVIE"}},
+        }
+        ds_client.get_bt_task_files = AsyncMock(return_value=[
+            {"name": "movie.mkv", "size": 12, "wanted": True},
+        ])
+        ds_client._file_station_request = AsyncMock(side_effect=[
+            {"success": True, "data": {"shares": [{
+                "path": "/MOVIE",
+                "additional": {"real_path": "/volume1/MOVIE"},
+            }]}},
+            {"success": True, "data": {"files": [{
+                "code": 408,
+                "path": "/MOVIE/movie.mkv",
+            }]}},
+            {"success": True, "data": {"files": [{
+                "path": "/MOVIE/Release.Name/movie.mkv",
+                "isdir": False,
+                "additional": {
+                    "real_path": "/volume1/MOVIE/Release.Name/movie.mkv",
+                    "size": 12,
+                },
+            }]}},
+        ])
+
+        manifest = await ds_client.prepare_file_manifest(task)
+
+        assert manifest.destination == "/MOVIE/Release.Name"
+        assert manifest.paths == ("/MOVIE/Release.Name/movie.mkv",)
+        assert manifest.real_paths == (
+            "/volume1/MOVIE/Release.Name/movie.mkv",
+        )
+
     async def test_delete_file_manifest_polls_and_stops_operation(self, ds_client):
         manifest = DS7FileManifest(
             task_id="bt-1",
