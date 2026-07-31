@@ -2,11 +2,18 @@
 
 import os
 import tempfile
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from tests.conftest import make_update, make_context
+
+
+def test_httpx_request_logging_is_suppressed():
+    import bot.main  # noqa: F401
+
+    assert logging.getLogger("httpx").level == logging.WARNING
 
 
 class TestTestCommand:

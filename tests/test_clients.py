@@ -722,8 +722,21 @@ class TestDownloadStationClient:
         with pytest.raises(ValueError, match="路径"):
             build_ds7_file_manifest(task, [{"name": name, "size": 1}])
 
+    def test_build_file_manifest_accepts_shared_folder_destination(self):
+        task = {
+            "id": "bt-1",
+            "type": "bt",
+            "additional": {"detail": {"destination": "MOVIE"}},
+        }
+
+        manifest = build_ds7_file_manifest(
+            task, [{"name": "Movie/movie.mkv", "size": 1}],
+        )
+
+        assert manifest.destination == "/MOVIE"
+        assert manifest.paths == ("/MOVIE/Movie/movie.mkv",)
+
     @pytest.mark.parametrize("destination", [
-        "volume1/downloads",
         "//volume1/downloads",
         "/volume1//downloads",
         "/volume1/../downloads",

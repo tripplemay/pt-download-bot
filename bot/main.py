@@ -51,6 +51,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     level=logging.INFO,
 )
+# httpx includes full request URLs in INFO logs. DSM authentication and PT
+# download requests place credentials in query strings, so suppress them.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # 视为占位符的值，不迁移到数据库

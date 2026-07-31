@@ -187,6 +187,11 @@ def build_ds7_file_manifest(task: dict, items: Sequence[dict]) -> DS7FileManifes
 
     detail = (task.get("additional") or {}).get("detail") or {}
     destination = str(detail.get("destination") or "").strip()
+    # DSM 7 may return a File Station shared-folder name (for example
+    # "MOVIE") rather than an absolute path. Normalize it before applying
+    # the same component validation used for absolute destinations.
+    if destination and not destination.startswith("/"):
+        destination = "/" + destination
     if (
         not destination
         or not destination.startswith("/")
