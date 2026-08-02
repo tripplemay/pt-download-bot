@@ -804,19 +804,39 @@ class DownloadStationClient(DownloadClientBase):
 
             form_data = {
                 "api": p.create_api,
-                "version": p.create_version,
                 "method": "create",
-                "_sid": self.sid,
+                "version": p.create_version,
             }
+            request_params = {}
 
             if p.version == 2:
-                form_data["type"] = "file"
-                form_data["create_list"] = "false"
+                # DS7's upload API uses ``file`` as a JSON list of multipart
+                # field names; the torrent bytes must be sent under that name.
+                form_data["type"] = json.dumps("file")
+                form_data["file"] = json.dumps(["torrent"])
                 if p.destination_required and p.destination:
-                    form_data["destination"] = p.destination
+                    form_data["destination"] = json.dumps(
+                        p.destination, ensure_ascii=False,
+                    )
+                form_data["create_list"] = "false"
+                request_params["_sid"] = self.sid
+                upload_field = "torrent"
+            else:
+                form_data["_sid"] = self.sid
+                upload_field = "file"
 
-            files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
-            resp = await self.client.post(self._api_url, data=form_data, files=files)
+            async def post_torrent():
+                files = {
+                    upload_field: (
+                        filename, torrent_bytes, "application/x-bittorrent",
+                    ),
+                }
+                request_kwargs = {"data": form_data, "files": files}
+                if request_params:
+                    request_kwargs["params"] = request_params
+                return await self.client.post(self._api_url, **request_kwargs)
+
+            resp = await post_torrent()
             resp.raise_for_status()
             data = resp.json()
 
@@ -825,10 +845,15 @@ class DownloadStationClient(DownloadClientBase):
                 if error.get("code") not in _AUTH_ERROR_CODES:
                     raise DownloadStationAPIError(error.get("code"), error)
                 logger.warning("DS 上传时会话失效，重新登录重试")
-                await self._refresh_login(form_data.get("_sid"))
-                form_data["_sid"] = self.sid
-                files = {"file": (filename, torrent_bytes, "application/x-bittorrent")}
-                resp = await self.client.post(self._api_url, data=form_data, files=files)
+                observed_sid = (
+                    request_params.get("_sid") or form_data.get("_sid")
+                )
+                await self._refresh_login(observed_sid)
+                if request_params:
+                    request_params["_sid"] = self.sid
+                else:
+                    form_data["_sid"] = self.sid
+                resp = await post_torrent()
                 resp.raise_for_status()
                 data = resp.json()
                 if not data.get("success"):

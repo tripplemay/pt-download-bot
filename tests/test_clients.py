@@ -267,6 +267,50 @@ class TestDownloadStationClient:
         )
         result = await ds_client.add_torrent_file(b"\x00torrent", "test.torrent")
         assert result is not None
+        call = ds_client.client.post.await_args
+        assert "params" not in call.kwargs
+        assert call.kwargs["data"] == {
+            "api": "SYNO.DownloadStation.Task",
+            "method": "create",
+            "version": "1",
+            "_sid": "existing_sid",
+        }
+        assert call.kwargs["files"] == {
+            "file": (
+                "test.torrent", b"\x00torrent", "application/x-bittorrent",
+            ),
+        }
+
+    async def test_add_torrent_file_v2_uses_upload_field_indirection(self, ds_client):
+        ds_client.sid = "existing_sid"
+        ds_client._profile = _v2_profile()
+        ds_client.client.post = AsyncMock(
+            return_value=_httpx_response(
+                json_data={"success": True, "data": {"task_id": ["dbid_55"]}},
+            )
+        )
+
+        result = await ds_client.add_torrent_file(
+            b"d4:infode", "release.torrent",
+        )
+
+        assert result == "dbid_55"
+        call = ds_client.client.post.await_args
+        assert call.kwargs["params"] == {"_sid": "existing_sid"}
+        assert call.kwargs["data"] == {
+            "api": "SYNO.DownloadStation2.Task",
+            "method": "create",
+            "version": "2",
+            "type": '"file"',
+            "file": '["torrent"]',
+            "destination": '"/volume1/downloads"',
+            "create_list": "false",
+        }
+        assert call.kwargs["files"] == {
+            "torrent": (
+                "release.torrent", b"d4:infode", "application/x-bittorrent",
+            ),
+        }
 
     async def test_add_torrent_file_failure(self, ds_client):
         ds_client.sid = "existing_sid"
@@ -281,9 +325,12 @@ class TestDownloadStationClient:
         expired_requests = 0
         both_expired = asyncio.Event()
 
-        async def post_with_expired_sid(*args, data, **kwargs):
+        async def post_with_expired_sid(*args, params, data, files, **kwargs):
             nonlocal expired_requests
-            request_sid = data["_sid"]
+            assert data["type"] == '"file"'
+            assert data["file"] == '["torrent"]'
+            assert set(files) == {"torrent"}
+            request_sid = params["_sid"]
             if request_sid == "expired_sid":
                 expired_requests += 1
                 if expired_requests == 2:
