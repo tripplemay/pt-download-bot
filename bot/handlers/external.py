@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from bot.handlers.download_utils import add_torrent_url_as_file
 from bot.middleware import require_auth
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,40 @@ def _safe_torrent_filename(filename: str | None) -> str:
     name = (filename or "external.torrent").strip() or "external.torrent"
     name = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return name or "external.torrent"
+
+
+def _is_configured_pt_torrent_url(
+    url: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Return whether a torrent download URL belongs to the configured PT site."""
+    pt_client = context.bot_data.get("pt_client")
+    base_url = getattr(pt_client, "base_url", "") if pt_client else ""
+    if not isinstance(base_url, str) or not base_url:
+        db = context.bot_data.get("db")
+        base_url = db.get_setting("pt_site_url") if db else ""
+    if not isinstance(base_url, str) or not base_url:
+        return False
+
+    parsed = urlparse(url)
+    base = urlparse(base_url)
+    path_name = parsed.path.rstrip("/").rsplit("/", 1)[-1].casefold()
+    return (
+        parsed.scheme in ("http", "https")
+        and base.scheme in ("http", "https")
+        and bool(parsed.netloc)
+        and parsed.netloc.casefold() == base.netloc.casefold()
+        and (path_name == "download.php" or path_name.endswith(".torrent"))
+    )
+
+
+def _torrent_filename_from_url(url: str) -> str:
+    """Build a harmless upload filename without retaining URL query parameters."""
+    path_name = unquote(urlparse(url).path.rstrip("/").rsplit("/", 1)[-1])
+    filename = _safe_torrent_filename(path_name or "pt-download.torrent")
+    if not filename.lower().endswith(".torrent"):
+        filename += ".torrent"
+    return filename
 
 
 async def _notify_owner_if_needed(
@@ -122,7 +157,21 @@ async def external_url_message(update: Update, context: ContextTypes.DEFAULT_TYP
     status_msg = await update.message.reply_text("正在添加站外下载任务...")
     task_id = None
     try:
-        task_id = await dl_client.add_torrent_url(url)
+        if _is_configured_pt_torrent_url(url, context):
+            pt_client = context.bot_data.get("pt_client")
+            if not pt_client:
+                raise RuntimeError("PT 站客户端未初始化")
+            db = context.bot_data["db"]
+            task_id = await add_torrent_url_as_file(
+                pt_client,
+                dl_client,
+                url,
+                _torrent_filename_from_url(url),
+                cookie=db.get_setting("pt_cookie") or "",
+            )
+            source_label = "PT 种子链接"
+        else:
+            task_id = await dl_client.add_torrent_url(url)
     except Exception:
         logger.exception("站外链接添加失败")
 

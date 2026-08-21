@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 from bot.handlers.external import (
     MAX_TORRENT_FILE_SIZE,
     _classify_external_url,
+    _is_configured_pt_torrent_url,
+    _torrent_filename_from_url,
     external_torrent_file_message,
     external_url_message,
 )
@@ -24,6 +26,37 @@ class TestClassifyExternalUrl:
     def test_requires_single_url_message(self):
         assert _classify_external_url("download https://example.com/a.torrent") is None
         assert _classify_external_url("hello") is None
+
+
+class TestConfiguredPtUrl:
+
+    def test_matches_configured_pt_client_origin(self, db_with_users):
+        pt_client = MagicMock()
+        pt_client.base_url = "https://pt.example.com"
+        context = make_context(db=db_with_users, pt_client=pt_client)
+
+        assert _is_configured_pt_torrent_url(
+            "https://pt.example.com/download.php?id=1", context,
+        ) is True
+        assert _is_configured_pt_torrent_url(
+            "https://pt.example.com.evil.test/download.php?id=1", context,
+        ) is False
+        assert _is_configured_pt_torrent_url(
+            "https://pt.example.com/files/movie.mkv", context,
+        ) is False
+
+    def test_uses_persisted_site_when_client_is_unavailable(self, db_with_users):
+        db_with_users.set_setting("pt_site_url", "https://pt.example.com/")
+        context = make_context(db=db_with_users)
+
+        assert _is_configured_pt_torrent_url(
+            "https://pt.example.com/download.php?id=1", context,
+        ) is True
+
+    def test_builds_torrent_filename_without_query(self):
+        assert _torrent_filename_from_url(
+            "https://pt.example.com/download.php?id=1&passkey=secret",
+        ) == "download.php.torrent"
 
 
 class TestExternalUrlMessage:
@@ -71,6 +104,70 @@ class TestExternalUrlMessage:
 
         assert "成功" in status_msg.edit_text.call_args[0][0]
         context.bot.send_message.assert_not_awaited()
+
+    async def test_configured_pt_url_is_downloaded_by_bot_then_uploaded(
+        self, db_with_users,
+    ):
+        db_with_users.set_setting("pt_cookie", "uid=1; pass=abc")
+        pt_client = AsyncMock()
+        pt_client.base_url = "https://pt.example.com"
+        pt_client.download_torrent = AsyncMock(return_value=b"d4:infode")
+        dl_client = AsyncMock()
+        dl_client.add_torrent_file = AsyncMock(return_value="task_pt")
+
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        url = "https://pt.example.com/download.php?id=1&passkey=secret"
+        update = make_update(user_id=111, text=url)
+        update.message.reply_to_message = None
+        update.message.reply_text = AsyncMock(return_value=status_msg)
+        context = make_context(
+            db=db_with_users,
+            pt_client=pt_client,
+            dl_client=dl_client,
+            owner_id=111,
+        )
+
+        await external_url_message(update, context)
+
+        pt_client.download_torrent.assert_awaited_once_with(
+            url, cookie="uid=1; pass=abc",
+        )
+        dl_client.add_torrent_file.assert_awaited_once_with(
+            b"d4:infode", "download.php.torrent",
+        )
+        dl_client.add_torrent_url.assert_not_awaited()
+        assert "成功" in status_msg.edit_text.call_args.args[0]
+        assert "PT 种子链接" in status_msg.edit_text.call_args.args[0]
+
+    async def test_configured_pt_url_never_falls_back_to_download_station_url(
+        self, db_with_users,
+    ):
+        pt_client = AsyncMock()
+        pt_client.base_url = "https://pt.example.com"
+        pt_client.download_torrent = AsyncMock(side_effect=ValueError("login page"))
+        dl_client = AsyncMock()
+
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        update = make_update(
+            user_id=111,
+            text="https://pt.example.com/download.php?id=1",
+        )
+        update.message.reply_to_message = None
+        update.message.reply_text = AsyncMock(return_value=status_msg)
+        context = make_context(
+            db=db_with_users,
+            pt_client=pt_client,
+            dl_client=dl_client,
+            owner_id=111,
+        )
+
+        await external_url_message(update, context)
+
+        dl_client.add_torrent_url.assert_not_awaited()
+        dl_client.add_torrent_file.assert_not_awaited()
+        assert "失败" in status_msg.edit_text.call_args.args[0]
 
     async def test_no_download_client(self, db_with_users):
         update = make_update(user_id=333, text="https://example.com/file.torrent")
